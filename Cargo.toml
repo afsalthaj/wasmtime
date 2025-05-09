@@ -60,6 +60,14 @@ wasmtime-wasi-threads = { workspace = true, optional = true }
 wasmtime-wasi-http = { workspace = true, optional = true }
 clap = { workspace = true }
 clap_complete = { workspace = true, optional = true }
+golem-rib-repl = { workspace = true, optional = true }
+golem-wasm-ast = {workspace = true, optional = true, default-features = false, features = [
+    "analysis",
+    "bincode",
+]}
+golem-wasm-rpc = { workspace = true, optional = true, default-features = false, features = [
+    "typeinfo",
+]}
 anyhow = { workspace = true, features = ['std'] }
 target-lexicon = { workspace = true }
 listenfd = { version = "1.0.0", optional = true }
@@ -129,6 +137,14 @@ wasmtime-test-macros = { path = "crates/test-macros" }
 pulley-interpreter = { workspace = true, features = ["disas"] }
 wasm-encoder = { workspace = true }
 cranelift-native = { workspace = true }
+golem-rib-repl = { workspace = true }
+golem-wasm-ast = {workspace = true, default-features = false, features = [
+  "analysis",
+  "bincode",
+]}
+golem-wasm-rpc = { workspace = true, default-features = false, features = [
+  "typeinfo",
+]}
 
 [target.'cfg(windows)'.dev-dependencies]
 windows-sys = { workspace = true, features = ["Win32_System_Memory"] }
@@ -388,6 +404,13 @@ webpki-roots = "0.26.0"
 itertools = "0.14.0"
 base64 = "0.22.1"
 termcolor = "1.4.1"
+# depending on https://github.com/golemcloud/golem/pull/1579/files
+golem-rib-repl = { path = "../../golem/golem-rib-repl", version = "=0.0.0" }
+golem-wasm-ast = { path = "../../golem/wasm-ast", version = "=0.0.0", default-features = false, features = [
+    "analysis",
+    "bincode",
+] }
+golem-wasm-rpc = { path = "../../golem/wasm-rpc", version = "=0.0.0", default-features = false, features = ["typeinfo"] }
 
 # =============================================================================
 #
@@ -513,6 +536,9 @@ wast = ["dep:wasmtime-wast"]
 config = ["cache"]
 compile = ["cranelift"]
 run = [
+  "dep:golem-rib-repl",
+  "dep:golem-wasm-ast",
+  "dep:golem-wasm-rpc",
   "dep:wasmtime-wasi",
   "wasmtime/runtime",
   "wasmtime/wave",
@@ -594,3 +620,4 @@ debug = "line-tables-only"
 inherits = "release"
 codegen-units = 1
 lto = true
+
