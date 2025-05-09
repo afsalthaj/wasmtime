@@ -11,14 +11,18 @@ use async_trait::async_trait;
 use anyhow::{anyhow, bail, Context as _, Error, Result};
 use clap::Parser;
 use golem_rib_repl::{
-    ReplDependencies, RibComponentMetadata, RibDependencyManager, RibRepl, RibReplConfig,
-    WorkerFunctionInvoke,
+    ComponentSource, ReplDependencies, RibComponentMetadata, RibDependencyManager, RibRepl,
+    RibReplConfig, WorkerFunctionInvoke,
+};
+use golem_wasm_ast::analysis::analysed_type::tuple;
+use golem_wasm_ast::analysis::{
+    AnalysedExport, AnalysedFunction, AnalysedFunctionParameter, AnalysedFunctionResult,
 };
 use golem_wasm_rpc::{Value, ValueAndType};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::thread;
+use std::{thread, vec};
 use uuid::Uuid;
 use wasi_common::sync::{ambient_authority, Dir, TcpListener, WasiCtxBuilder};
 use wasmtime::{Engine, Func, Module, Store, StoreLimits, Val, ValType};
@@ -116,10 +120,28 @@ impl RibDependencyManager for WasmtimeComponentDependencyManager {
         _source_path: &Path,
         component_name: String,
     ) -> anyhow::Result<RibComponentMetadata> {
+        let metadata = AnalysedExport::Function(AnalysedFunction {
+            name: "add".to_string(),
+            parameters: vec![
+                AnalysedFunctionParameter {
+                    name: "a".to_string(),
+                    typ: golem_wasm_ast::analysis::analysed_type::s16(),
+                },
+                AnalysedFunctionParameter {
+                    name: "a".to_string(),
+                    typ: golem_wasm_ast::analysis::analysed_type::s16(),
+                },
+            ],
+            results: vec![AnalysedFunctionResult {
+                name: None,
+                typ: golem_wasm_ast::analysis::analysed_type::s16(),
+            }],
+        });
+
         Ok(RibComponentMetadata {
             component_id: Uuid::new_v4(),
             component_name,
-            metadata: vec![],
+            metadata: vec![metadata],
         })
     }
 }
@@ -137,8 +159,8 @@ impl WorkerFunctionInvoke for WasmtimeFunctionInvoke {
         _args: Vec<ValueAndType>,
     ) -> anyhow::Result<ValueAndType> {
         Ok(ValueAndType {
-            value: Value::S16(10),
-            typ: golem_wasm_ast::analysis::analysed_type::s16(),
+            value: Value::Tuple(vec![Value::S16(3)]),
+            typ: tuple(vec![golem_wasm_ast::analysis::analysed_type::s16()]),
         })
     }
 }
@@ -151,7 +173,10 @@ impl ReplCommand {
             dependency_manager: Arc::new(WasmtimeComponentDependencyManager {}),
             worker_function_invoke: Arc::new(WasmtimeFunctionInvoke {}),
             printer: None,
-            component_source: None,
+            component_source: Some(ComponentSource {
+                source_path: PathBuf::from(&self.component_file),
+                component_name: "singleton".to_string(),
+            }),
             prompt: None,
         };
         let mut repl = RibRepl::bootstrap(repl_config).await?;
