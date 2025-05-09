@@ -11,6 +11,7 @@ cranelift.dbg*
 docs/_build
 docs/book
 .vscode/
+.idea/
 .vs/
 rusty-tags.*
 tags

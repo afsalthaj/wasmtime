@@ -9,6 +9,11 @@ use crate::common::{Profile, RunCommon, RunTarget};
 
 use anyhow::{anyhow, bail, Context as _, Error, Result};
 use clap::Parser;
+// use golem_rib_repl::{
+//     ReplDependencies, RibComponentMetadata, RibDependencyManager, RibRepl, RibReplConfig,
+//     WorkerFunctionInvoke,
+// };
+//use golem_wasm_rpc::{Value, ValueAndType};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -42,6 +47,12 @@ fn parse_preloads(s: &str) -> Result<(String, PathBuf)> {
     }
     Ok((parts[0].into(), parts[1].into()))
 }
+
+// #[derive(Parser)]
+// pub struct ReplCommand {
+//     #[arg(long, value_name = "WASM")]
+//     component_file: String,
+// }
 
 /// Runs a WebAssembly module
 #[derive(Parser)]
@@ -86,6 +97,64 @@ enum CliLinker {
     #[cfg(feature = "component-model")]
     Component(wasmtime::component::Linker<Host>),
 }
+
+struct WasmtimeComponentDependencyManager {}
+
+// #[async_trait]
+// impl RibDependencyManager for WasmtimeComponentDependencyManager {
+//     async fn get_dependencies(&self) -> anyhow::Result<ReplDependencies> {
+//         Ok(ReplDependencies {
+//             component_dependencies: vec![],
+//         })
+//     }
+
+//     async fn add_component(
+//         &self,
+//         source_path: &Path,
+//         component_name: String,
+//     ) -> anyhow::Result<RibComponentMetadata> {
+//         Ok(RibComponentMetadata {
+//             component_id: Uuid::new_v4(),
+//             component_name,
+//             metadata: vec![],
+//         })
+//     }
+// }
+
+struct WasmtimeFunctionInvoke {}
+
+// #[async_trait]
+// impl WorkerFunctionInvoke for WasmtimeFunctionInvoke {
+//     async fn invoke(
+//         &self,
+//         component_id: Uuid,
+//         component_name: &str,
+//         worker_name: Option<String>,
+//         function_name: &str,
+//         args: Vec<ValueAndType>,
+//     ) -> anyhow::Result<ValueAndType> {
+//         Ok(ValueAndType {
+//             value: Value::S16(10),
+//             typ: golem_wasm_ast::analysis::analysed_type::s16(),
+//         })
+//     }
+// }
+
+// impl ReplCommand {
+//     pub async fn execute(mut self) -> Result<()> {
+//         let repl_config = RibReplConfig {
+//             history_file: None,
+//             dependency_manager: Arc::new(WasmtimeComponentDependencyManager {}),
+//             worker_function_invoke: Arc::new(WasmtimeFunctionInvoke {}),
+//             printer: None,
+//             component_source: None,
+//             prompt: None,
+//         };
+//         let repl = RibRepl::bootstrap(config).await?;
+
+//         repl.run().await.context("failed to run the REPL")?;
+//     }
+// }
 
 impl RunCommand {
     /// Executes the command.

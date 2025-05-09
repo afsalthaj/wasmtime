@@ -3,6 +3,8 @@
 //! Primarily used to run WebAssembly modules.
 //! See `wasmtime --help` for usage.
 
+use core::panic;
+
 use anyhow::Result;
 use clap::Parser;
 
@@ -54,6 +56,7 @@ fn version() -> &'static str {
 
 #[derive(Parser)]
 enum Subcommand {
+    //Repl(wasmtime_cli::commands::ReplCommand),
     /// Runs a WebAssembly module
     #[cfg(feature = "run")]
     Run(wasmtime_cli::commands::RunCommand),
@@ -100,6 +103,8 @@ impl Wasmtime {
         let subcommand = self.subcommand;
 
         match subcommand {
+            //#[cfg(feature = "run")]
+            //Subcommand::Repl(c) => panic!("REPL not implemented yet"),
             #[cfg(feature = "run")]
             Subcommand::Run(c) => c.execute(),
 
@@ -162,6 +167,10 @@ impl CompletionCommand {
 }
 
 fn main() -> Result<()> {
+    // return tokio::runtime::Builder::new_multi_thread()
+    //     .enable_all()
+    //     .build()?
+    //     .block_on(Wasmtime::parse().execute());
     return Wasmtime::parse().execute();
 }
 
