@@ -3,8 +3,6 @@
 //! Primarily used to run WebAssembly modules.
 //! See `wasmtime --help` for usage.
 
-use core::panic;
-
 use anyhow::Result;
 use clap::Parser;
 
