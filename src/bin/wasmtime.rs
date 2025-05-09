@@ -54,7 +54,9 @@ fn version() -> &'static str {
 
 #[derive(Parser)]
 enum Subcommand {
-    //Repl(wasmtime_cli::commands::ReplCommand),
+    /// Runs a wasmtime REPL
+    #[cfg(feature = "run")]
+    Repl(wasmtime_cli::commands::ReplCommand),
     /// Runs a WebAssembly module
     #[cfg(feature = "run")]
     Run(wasmtime_cli::commands::RunCommand),
@@ -94,15 +96,16 @@ enum Subcommand {
 
 impl Wasmtime {
     /// Executes the command.
-    pub fn execute(self) -> Result<()> {
+    pub async fn execute(self) -> Result<()> {
         #[cfg(feature = "run")]
         let subcommand = self.subcommand.unwrap_or(Subcommand::Run(self.run));
         #[cfg(not(feature = "run"))]
         let subcommand = self.subcommand;
 
         match subcommand {
-            //#[cfg(feature = "run")]
-            //Subcommand::Repl(c) => panic!("REPL not implemented yet"),
+            #[cfg(feature = "run")]
+            Subcommand::Repl(c) => c.execute().await,
+
             #[cfg(feature = "run")]
             Subcommand::Run(c) => c.execute(),
 
@@ -165,11 +168,11 @@ impl CompletionCommand {
 }
 
 fn main() -> Result<()> {
-    // return tokio::runtime::Builder::new_multi_thread()
-    //     .enable_all()
-    //     .build()?
-    //     .block_on(Wasmtime::parse().execute());
-    return Wasmtime::parse().execute();
+    return tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(Wasmtime::parse().execute());
+    // return Wasmtime::parse().execute();
 }
 
 #[test]
