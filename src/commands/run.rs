@@ -19,6 +19,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use uuid::Uuid;
 use wasi_common::sync::{ambient_authority, Dir, TcpListener, WasiCtxBuilder};
 use wasmtime::{Engine, Func, Module, Store, StoreLimits, Val, ValType};
 use wasmtime_wasi::p2::{IoView, WasiView};
@@ -49,6 +50,7 @@ fn parse_preloads(s: &str) -> Result<(String, PathBuf)> {
     Ok((parts[0].into(), parts[1].into()))
 }
 
+/// Runs a Wasmtime REPL
 #[derive(Parser)]
 pub struct ReplCommand {
     #[arg(long, value_name = "WASM")]
@@ -142,7 +144,8 @@ impl WorkerFunctionInvoke for WasmtimeFunctionInvoke {
 }
 
 impl ReplCommand {
-    pub async fn execute(mut self) -> Result<()> {
+    /// Executes the command.
+    pub async fn execute(&self) -> Result<()> {
         let repl_config = RibReplConfig {
             history_file: None,
             dependency_manager: Arc::new(WasmtimeComponentDependencyManager {}),

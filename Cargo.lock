@@ -5760,6 +5760,7 @@ dependencies = [
  "toml",
  "tracing",
  "trait-variant",
+ "uuid",
  "walkdir",
  "wasi-common",
  "wasm-encoder 0.230.0",
