@@ -56,7 +56,7 @@ fn version() -> &'static str {
 enum Subcommand {
     /// Runs a wasmtime REPL
     #[cfg(feature = "run")]
-    Repl(wasmtime_cli::commands::ReplCommand),
+    Repl(wasmtime_cli::commands::RunCommand),
     /// Runs a WebAssembly module
     #[cfg(feature = "run")]
     Run(wasmtime_cli::commands::RunCommand),
@@ -98,13 +98,13 @@ impl Wasmtime {
     /// Executes the command.
     pub async fn execute(self) -> Result<()> {
         #[cfg(feature = "run")]
-        let subcommand = self.subcommand.unwrap_or(Subcommand::Run(self.run));
+        let mut subcommand = self.subcommand.unwrap_or(Subcommand::Run(self.run));
         #[cfg(not(feature = "run"))]
         let subcommand = self.subcommand;
 
         match subcommand {
             #[cfg(feature = "run")]
-            Subcommand::Repl(c) => c.execute().await,
+            Subcommand::Repl(mut c) => c.execute_repl().await,
 
             #[cfg(feature = "run")]
             Subcommand::Run(c) => c.execute().await,

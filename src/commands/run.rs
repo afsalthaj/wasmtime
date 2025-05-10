@@ -16,14 +16,13 @@ use golem_rib_repl::{
 };
 use golem_wasm_ast::analysis::analysed_type::tuple;
 use golem_wasm_ast::analysis::wit_parser::WitAnalysisContext;
-use golem_wasm_ast::analysis::{
-    AnalysedExport, AnalysedFunction, AnalysedFunctionParameter, AnalysedFunctionResult,
-};
-use golem_wasm_rpc::{Value, ValueAndType};
+use golem_wasm_rpc::{parse_value_and_type, Value, ValueAndType};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::{thread, vec};
+use golem_wasm_ast::analysis::AnalysedType;
+use rib::{ParsedFunctionName, ParsedFunctionReference};
 use uuid::Uuid;
 use wasi_common::sync::{ambient_authority, Dir, TcpListener, WasiCtxBuilder};
 use wasmtime::{Engine, Func, Module, Store, StoreLimits, Val, ValType};
@@ -55,15 +54,8 @@ fn parse_preloads(s: &str) -> Result<(String, PathBuf)> {
     Ok((parts[0].into(), parts[1].into()))
 }
 
-/// Runs a Wasmtime REPL
-#[derive(Parser)]
-pub struct ReplCommand {
-    #[arg(long, value_name = "WASM")]
-    component_file: String,
-}
-
 /// Runs a WebAssembly module
-#[derive(Parser)]
+#[derive(Parser, Clone)]
 pub struct RunCommand {
     #[command(flatten)]
     #[expect(missing_docs, reason = "don't want to mess with clap doc-strings")]
@@ -138,7 +130,10 @@ impl RibDependencyManager for WasmtimeComponentDependencyManager {
     }
 }
 
-struct WasmtimeFunctionInvoke {}
+struct WasmtimeFunctionInvoke{
+    run_command: RunCommand
+}
+
 
 #[async_trait]
 impl WorkerFunctionInvoke for WasmtimeFunctionInvoke {
@@ -147,26 +142,33 @@ impl WorkerFunctionInvoke for WasmtimeFunctionInvoke {
         _component_id: Uuid,
         _component_name: &str,
         _worker_name: Option<String>,
-        _function_name: &str,
-        _args: Vec<ValueAndType>,
+        function_name: &str,
+        args: Vec<ValueAndType>,
+        return_type: AnalysedType
     ) -> anyhow::Result<ValueAndType> {
-        Ok(ValueAndType {
-            value: Value::Tuple(vec![Value::S16(3)]),
-            typ: tuple(vec![golem_wasm_ast::analysis::analysed_type::s16()]),
-        })
+        let mut run_command = self.run_command.clone();
+        run_command.invoke_component_function(function_name, args, &return_type).await
     }
 }
 
-impl ReplCommand {
-    /// Executes the command.
-    pub async fn execute(&self) -> Result<()> {
+impl RunCommand {
+
+    /// Execute Repl
+    pub async fn execute_repl(mut self) -> Result<()> {
+
+        let path = PathBuf::from(&self.module_and_args[0]);
+
+        let invoke = WasmtimeFunctionInvoke {
+            run_command: self
+        };
+
         let repl_config = RibReplConfig {
             history_file: None,
             dependency_manager: Arc::new(WasmtimeComponentDependencyManager {}),
-            worker_function_invoke: Arc::new(WasmtimeFunctionInvoke {}),
+            worker_function_invoke: Arc::new(invoke),
             printer: None,
             component_source: Some(ComponentSource {
-                source_path: PathBuf::from(&self.component_file),
+                source_path: path,
                 component_name: "singleton".to_string(),
             }),
             prompt: None,
@@ -176,9 +178,75 @@ impl ReplCommand {
         repl.run().await;
         Ok(())
     }
-}
 
-impl RunCommand {
+
+    /// Invoke Component Function
+    pub async fn invoke_component_function(
+        mut self,
+        function_name: &str,
+        args: Vec<ValueAndType>,
+        return_type: &AnalysedType
+    ) -> Result<ValueAndType> {
+        //self.run.common.init_logging()?;
+        let mut config = self.run.common.config(None)?;
+        config.async_support(true);
+
+        let engine = Engine::new(&config)?;
+
+        let main = self
+            .run
+            .load_module(&engine, self.module_and_args[0].as_ref())?;
+
+        let mut linker = match &main {
+            RunTarget::Core(_) => bail!("expecting a wasm component"),
+            #[cfg(feature = "component-model")]
+            RunTarget::Component(_) => {
+                CliLinker::Component(wasmtime::component::Linker::new(&engine))
+            }
+        };
+
+        let host = Host::default();
+
+        let mut store = Store::new(&engine, host);
+        self.populate_with_wasi(&mut linker, &mut store, &main)?;
+
+        let args = args
+            .iter()
+            .map(|x| x.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let function_name_without_golem =
+            match ParsedFunctionName::parse(function_name).unwrap().function {
+                ParsedFunctionReference::Function {function} => function,
+                _ => panic!("currently supporting only function types")
+            };
+
+        let function_name = format!("{}({})", function_name_without_golem, args);
+
+        let result = self
+            .load_and_invoke_component(&mut store, &mut linker, &main, &function_name)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to load and invoke component function `{}`",
+                    self.module_and_args[0].to_string_lossy()
+                )
+            })?;
+
+         let result = result[0].to_wave()?;
+
+        let result =
+            parse_value_and_type(return_type, &result).map_err(|e| anyhow!(e))?;
+
+        let golem_result =
+            ValueAndType::new(Value::Tuple(vec![result.value]), tuple(
+                vec![result.typ]
+            ));
+
+        Ok(golem_result)
+    }
+
     /// Executes the command.
     pub async fn execute(mut self) -> Result<()> {
         self.run.common.init_logging()?;
@@ -257,13 +325,6 @@ impl RunCommand {
             store.set_fuel(fuel)?;
         }
 
-        // Always run the module asynchronously to ensure that the module can be
-        // interrupted, even if it is blocking on I/O or a timeout or something.
-        // let runtime = tokio::runtime::Builder::new_multi_thread()
-        //     .enable_time()
-        //     .enable_io()
-        //     .build()?;
-
         let dur = self
             .run
             .common
@@ -324,62 +385,6 @@ impl RunCommand {
                 })
         })
         .await;
-
-        // let result = runtime.block_on(async {
-        //     tokio::time::timeout(dur, async {
-        //         let mut profiled_modules: Vec<(String, Module)> = Vec::new();
-        //         if let RunTarget::Core(m) = &main {
-        //             profiled_modules.push(("".to_string(), m.clone()));
-        //         }
-
-        //         // Load the preload wasm modules.
-        //         for (name, path) in self.preloads.iter() {
-        //             // Read the wasm module binary either as `*.wat` or a raw binary
-        //             let preload_target = self.run.load_module(&engine, path)?;
-        //             let preload_module = match preload_target {
-        //                 RunTarget::Core(m) => m,
-        //                 #[cfg(feature = "component-model")]
-        //                 RunTarget::Component(_) => {
-        //                     bail!("components cannot be loaded with `--preload`")
-        //                 }
-        //             };
-        //             profiled_modules.push((name.to_string(), preload_module.clone()));
-
-        //             // Add the module's functions to the linker.
-        //             match &mut linker {
-        //                 #[cfg(feature = "cranelift")]
-        //                 CliLinker::Core(linker) => {
-        //                     linker
-        //                         .module_async(&mut store, name, &preload_module)
-        //                         .await
-        //                         .context(format!(
-        //                             "failed to process preload `{}` at `{}`",
-        //                             name,
-        //                             path.display()
-        //                         ))?;
-        //                 }
-        //                 #[cfg(not(feature = "cranelift"))]
-        //                 CliLinker::Core(_) => {
-        //                     bail!("support for --preload disabled at compile time");
-        //                 }
-        //                 #[cfg(feature = "component-model")]
-        //                 CliLinker::Component(_) => {
-        //                     bail!("--preload cannot be used with components");
-        //                 }
-        //             }
-        //         }
-
-        //         self.load_main_module(&mut store, &mut linker, &main, profiled_modules)
-        //             .await
-        //             .with_context(|| {
-        //                 format!(
-        //                     "failed to run main module `{}`",
-        //                     self.module_and_args[0].to_string_lossy()
-        //                 )
-        //             })
-        //     })
-        //     .await
-        // });
 
         // Load the main wasm module.
         match result.unwrap_or_else(|elapsed| {
@@ -563,6 +568,26 @@ impl RunCommand {
         });
     }
 
+    async fn load_and_invoke_component(
+        &self,
+        store: &mut Store<Host>,
+        linker: &mut CliLinker,
+        main_target: &RunTarget,
+        function_call: &str,
+    ) -> Result<Vec<wasmtime::component::Val>> {
+        let component = main_target.unwrap_component();
+
+        match linker {
+            CliLinker::Core(_) => bail!("expected component, found core module".to_string()),
+
+            #[cfg(feature = "component-model")]
+            CliLinker::Component(linker) => {
+                self.invoke_component_and_get_result(function_call, store, component, linker)
+                    .await
+            }
+        }
+    }
+
     async fn load_main_module(
         &self,
         store: &mut Store<Host>,
@@ -641,29 +666,35 @@ impl RunCommand {
             #[cfg(feature = "component-model")]
             CliLinker::Component(linker) => {
                 let component = main_target.unwrap_component();
-                if self.invoke.is_some() {
-                    self.invoke_component(&mut *store, component, linker).await
-                } else {
-                    let command = wasmtime_wasi::p2::bindings::Command::instantiate_async(
-                        &mut *store,
-                        component,
-                        linker,
-                    )
-                    .await?;
 
-                    let result = command
-                        .wasi_cli_run()
-                        .call_run(&mut *store)
-                        .await
-                        .context("failed to invoke `run` function")
-                        .map_err(|e| self.handle_core_dump(&mut *store, e));
+                match &self.invoke {
+                    Some(name) => {
+                        self.invoke_component(&mut *store, component, linker, name)
+                            .await
+                    }
 
-                    // Translate the `Result<(),()>` produced by wasm into a feigned
-                    // explicit exit here with status 1 if `Err(())` is returned.
-                    result.and_then(|wasm_result| match wasm_result {
-                        Ok(()) => Ok(()),
-                        Err(()) => Err(wasmtime_wasi::I32Exit(1).into()),
-                    })
+                    None => {
+                        let command = wasmtime_wasi::p2::bindings::Command::instantiate_async(
+                            &mut *store,
+                            component,
+                            linker,
+                        )
+                        .await?;
+
+                        let result = command
+                            .wasi_cli_run()
+                            .call_run(&mut *store)
+                            .await
+                            .context("failed to invoke `run` function")
+                            .map_err(|e| self.handle_core_dump(&mut *store, e));
+
+                        // Translate the `Result<(),()>` produced by wasm into a feigned
+                        // explicit exit here with status 1 if `Err(())` is returned.
+                        result.and_then(|wasm_result| match wasm_result {
+                            Ok(()) => Ok(()),
+                            Err(()) => Err(wasmtime_wasi::I32Exit(1).into()),
+                        })
+                    }
                 }
             }
         };
@@ -672,24 +703,37 @@ impl RunCommand {
         result
     }
 
-    #[cfg(feature = "component-model")]
     async fn invoke_component(
         &self,
         store: &mut Store<Host>,
         component: &wasmtime::component::Component,
         linker: &mut wasmtime::component::Linker<Host>,
+        function_call: &str,
     ) -> Result<()> {
+        use wasmtime::component::wasm_wave::wasm::DisplayFuncResults;
+
+        let results = self
+            .invoke_component_and_get_result(function_call, store, component, linker)
+            .await?;
+
+        println!("{}", DisplayFuncResults(&results));
+
+        Ok(())
+    }
+
+    #[cfg(feature = "component-model")]
+    async fn invoke_component_and_get_result(
+        &self,
+        invoke: &str,
+        store: &mut Store<Host>,
+        component: &wasmtime::component::Component,
+        linker: &mut wasmtime::component::Linker<Host>,
+    ) -> Result<Vec<wasmtime::component::Val>> {
         use wasmtime::component::{
             types::ComponentItem,
-            wasm_wave::{
-                untyped::UntypedFuncCall,
-                wasm::{DisplayFuncResults, WasmFunc},
-            },
+            wasm_wave::{untyped::UntypedFuncCall, wasm::WasmFunc},
             Val,
         };
-
-        // Check if the invoke string is present
-        let invoke: &String = self.invoke.as_ref().unwrap();
 
         let untyped_call = UntypedFuncCall::parse(invoke).with_context(|| {
                 format!(
@@ -734,12 +778,10 @@ impl RunCommand {
             .get_func(&mut *store, export)
             .expect("found export index");
 
-        let mut results = vec![Val::Bool(false); result_len];
+        let mut results: Vec<Val> = vec![Val::Bool(false); result_len];
         func.call_async(&mut *store, &params, &mut results).await?;
 
-        println!("{}", DisplayFuncResults(&results));
-
-        Ok(())
+        Ok(results)
     }
 
     #[cfg(feature = "component-model")]

@@ -5732,6 +5732,7 @@ dependencies = [
  "env_logger 0.11.5",
  "filecheck",
  "gimli",
+ "golem-rib",
  "golem-rib-repl",
  "golem-wasm-ast",
  "golem-wasm-rpc",
