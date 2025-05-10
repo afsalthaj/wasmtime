@@ -15,6 +15,7 @@ use golem_rib_repl::{
     RibReplConfig, WorkerFunctionInvoke,
 };
 use golem_wasm_ast::analysis::analysed_type::tuple;
+use golem_wasm_ast::analysis::wit_parser::WitAnalysisContext;
 use golem_wasm_ast::analysis::{
     AnalysedExport, AnalysedFunction, AnalysedFunctionParameter, AnalysedFunctionResult,
 };
@@ -117,31 +118,22 @@ impl RibDependencyManager for WasmtimeComponentDependencyManager {
 
     async fn add_component(
         &self,
-        _source_path: &Path,
+        source_path: &Path,
         component_name: String,
     ) -> anyhow::Result<RibComponentMetadata> {
-        let metadata = AnalysedExport::Function(AnalysedFunction {
-            name: "add".to_string(),
-            parameters: vec![
-                AnalysedFunctionParameter {
-                    name: "a".to_string(),
-                    typ: golem_wasm_ast::analysis::analysed_type::s16(),
-                },
-                AnalysedFunctionParameter {
-                    name: "a".to_string(),
-                    typ: golem_wasm_ast::analysis::analysed_type::s16(),
-                },
-            ],
-            results: vec![AnalysedFunctionResult {
-                name: None,
-                typ: golem_wasm_ast::analysis::analysed_type::s16(),
-            }],
-        });
+        let component_data = std::fs::read(source_path)?;
+
+        let wit_analysis =
+            WitAnalysisContext::new(&component_data).map_err(|err| anyhow!(err.reason))?;
+
+        let exports = wit_analysis
+            .get_top_level_exports()
+            .map_err(|err| anyhow!(err.reason))?;
 
         Ok(RibComponentMetadata {
             component_id: Uuid::new_v4(),
             component_name,
-            metadata: vec![metadata],
+            metadata: exports,
         })
     }
 }
@@ -188,7 +180,7 @@ impl ReplCommand {
 
 impl RunCommand {
     /// Executes the command.
-    pub fn execute(mut self) -> Result<()> {
+    pub async fn execute(mut self) -> Result<()> {
         self.run.common.init_logging()?;
 
         let mut config = self.run.common.config(None)?;
@@ -267,10 +259,10 @@ impl RunCommand {
 
         // Always run the module asynchronously to ensure that the module can be
         // interrupted, even if it is blocking on I/O or a timeout or something.
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_time()
-            .enable_io()
-            .build()?;
+        // let runtime = tokio::runtime::Builder::new_multi_thread()
+        //     .enable_time()
+        //     .enable_io()
+        //     .build()?;
 
         let dur = self
             .run
@@ -278,61 +270,116 @@ impl RunCommand {
             .wasm
             .timeout
             .unwrap_or(std::time::Duration::MAX);
-        let result = runtime.block_on(async {
-            tokio::time::timeout(dur, async {
-                let mut profiled_modules: Vec<(String, Module)> = Vec::new();
-                if let RunTarget::Core(m) = &main {
-                    profiled_modules.push(("".to_string(), m.clone()));
-                }
 
-                // Load the preload wasm modules.
-                for (name, path) in self.preloads.iter() {
-                    // Read the wasm module binary either as `*.wat` or a raw binary
-                    let preload_target = self.run.load_module(&engine, path)?;
-                    let preload_module = match preload_target {
-                        RunTarget::Core(m) => m,
-                        #[cfg(feature = "component-model")]
-                        RunTarget::Component(_) => {
-                            bail!("components cannot be loaded with `--preload`")
-                        }
-                    };
-                    profiled_modules.push((name.to_string(), preload_module.clone()));
+        let result = tokio::time::timeout(dur, async {
+            let mut profiled_modules: Vec<(String, Module)> = Vec::new();
+            if let RunTarget::Core(m) = &main {
+                profiled_modules.push(("".to_string(), m.clone()));
+            }
 
-                    // Add the module's functions to the linker.
-                    match &mut linker {
-                        #[cfg(feature = "cranelift")]
-                        CliLinker::Core(linker) => {
-                            linker
-                                .module_async(&mut store, name, &preload_module)
-                                .await
-                                .context(format!(
-                                    "failed to process preload `{}` at `{}`",
-                                    name,
-                                    path.display()
-                                ))?;
-                        }
-                        #[cfg(not(feature = "cranelift"))]
-                        CliLinker::Core(_) => {
-                            bail!("support for --preload disabled at compile time");
-                        }
-                        #[cfg(feature = "component-model")]
-                        CliLinker::Component(_) => {
-                            bail!("--preload cannot be used with components");
-                        }
+            // Load the preload wasm modules.
+            for (name, path) in self.preloads.iter() {
+                // Read the wasm module binary either as `*.wat` or a raw binary
+                let preload_target = self.run.load_module(&engine, path)?;
+                let preload_module = match preload_target {
+                    RunTarget::Core(m) => m,
+                    #[cfg(feature = "component-model")]
+                    RunTarget::Component(_) => {
+                        bail!("components cannot be loaded with `--preload`")
+                    }
+                };
+                profiled_modules.push((name.to_string(), preload_module.clone()));
+
+                // Add the module's functions to the linker.
+                match &mut linker {
+                    #[cfg(feature = "cranelift")]
+                    CliLinker::Core(linker) => {
+                        linker
+                            .module_async(&mut store, name, &preload_module)
+                            .await
+                            .context(format!(
+                                "failed to process preload `{}` at `{}`",
+                                name,
+                                path.display()
+                            ))?;
+                    }
+                    #[cfg(not(feature = "cranelift"))]
+                    CliLinker::Core(_) => {
+                        bail!("support for --preload disabled at compile time");
+                    }
+                    #[cfg(feature = "component-model")]
+                    CliLinker::Component(_) => {
+                        bail!("--preload cannot be used with components");
                     }
                 }
+            }
 
-                self.load_main_module(&mut store, &mut linker, &main, profiled_modules)
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "failed to run main module `{}`",
-                            self.module_and_args[0].to_string_lossy()
-                        )
-                    })
-            })
-            .await
-        });
+            self.load_main_module(&mut store, &mut linker, &main, profiled_modules)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to run main module `{}`",
+                        self.module_and_args[0].to_string_lossy()
+                    )
+                })
+        })
+        .await;
+
+        // let result = runtime.block_on(async {
+        //     tokio::time::timeout(dur, async {
+        //         let mut profiled_modules: Vec<(String, Module)> = Vec::new();
+        //         if let RunTarget::Core(m) = &main {
+        //             profiled_modules.push(("".to_string(), m.clone()));
+        //         }
+
+        //         // Load the preload wasm modules.
+        //         for (name, path) in self.preloads.iter() {
+        //             // Read the wasm module binary either as `*.wat` or a raw binary
+        //             let preload_target = self.run.load_module(&engine, path)?;
+        //             let preload_module = match preload_target {
+        //                 RunTarget::Core(m) => m,
+        //                 #[cfg(feature = "component-model")]
+        //                 RunTarget::Component(_) => {
+        //                     bail!("components cannot be loaded with `--preload`")
+        //                 }
+        //             };
+        //             profiled_modules.push((name.to_string(), preload_module.clone()));
+
+        //             // Add the module's functions to the linker.
+        //             match &mut linker {
+        //                 #[cfg(feature = "cranelift")]
+        //                 CliLinker::Core(linker) => {
+        //                     linker
+        //                         .module_async(&mut store, name, &preload_module)
+        //                         .await
+        //                         .context(format!(
+        //                             "failed to process preload `{}` at `{}`",
+        //                             name,
+        //                             path.display()
+        //                         ))?;
+        //                 }
+        //                 #[cfg(not(feature = "cranelift"))]
+        //                 CliLinker::Core(_) => {
+        //                     bail!("support for --preload disabled at compile time");
+        //                 }
+        //                 #[cfg(feature = "component-model")]
+        //                 CliLinker::Component(_) => {
+        //                     bail!("--preload cannot be used with components");
+        //                 }
+        //             }
+        //         }
+
+        //         self.load_main_module(&mut store, &mut linker, &main, profiled_modules)
+        //             .await
+        //             .with_context(|| {
+        //                 format!(
+        //                     "failed to run main module `{}`",
+        //                     self.module_and_args[0].to_string_lossy()
+        //                 )
+        //             })
+        //     })
+        //     .await
+        // });
 
         // Load the main wasm module.
         match result.unwrap_or_else(|elapsed| {

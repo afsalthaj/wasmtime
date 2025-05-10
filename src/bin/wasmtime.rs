@@ -107,7 +107,7 @@ impl Wasmtime {
             Subcommand::Repl(c) => c.execute().await,
 
             #[cfg(feature = "run")]
-            Subcommand::Run(c) => c.execute(),
+            Subcommand::Run(c) => c.execute().await,
 
             #[cfg(feature = "cache")]
             Subcommand::Config(c) => c.execute(),
@@ -167,11 +167,9 @@ impl CompletionCommand {
     }
 }
 
-fn main() -> Result<()> {
-    return tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?
-        .block_on(Wasmtime::parse().execute());
+#[tokio::main]
+async fn main() -> Result<()> {
+    return Wasmtime::parse().execute().await;
     // return Wasmtime::parse().execute();
 }
 
