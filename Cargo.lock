@@ -2036,6 +2036,7 @@ dependencies = [
  "tonic",
  "tracing",
  "uuid",
+ "wasm-wave 0.227.1",
 ]
 
 [[package]]
