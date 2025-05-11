@@ -98,13 +98,13 @@ impl Wasmtime {
     /// Executes the command.
     pub async fn execute(self) -> Result<()> {
         #[cfg(feature = "run")]
-        let mut subcommand = self.subcommand.unwrap_or(Subcommand::Run(self.run));
+        let subcommand = self.subcommand.unwrap_or(Subcommand::Run(self.run));
         #[cfg(not(feature = "run"))]
         let subcommand = self.subcommand;
 
         match subcommand {
             #[cfg(feature = "run")]
-            Subcommand::Repl(mut c) => c.execute_repl().await,
+            Subcommand::Repl(c) => c.execute_repl().await,
 
             #[cfg(feature = "run")]
             Subcommand::Run(c) => c.execute().await,

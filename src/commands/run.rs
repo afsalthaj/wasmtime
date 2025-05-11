@@ -146,7 +146,7 @@ impl WorkerFunctionInvoke for WasmtimeFunctionInvoke {
         args: Vec<ValueAndType>,
         return_type: AnalysedType
     ) -> anyhow::Result<ValueAndType> {
-        let mut run_command = self.run_command.clone();
+        let run_command = self.run_command.clone();
         run_command.invoke_component_function(function_name, args, &return_type).await
     }
 }
@@ -154,7 +154,7 @@ impl WorkerFunctionInvoke for WasmtimeFunctionInvoke {
 impl RunCommand {
 
     /// Execute Repl
-    pub async fn execute_repl(mut self) -> Result<()> {
+    pub async fn execute_repl(self) -> Result<()> {
 
         let path = PathBuf::from(&self.module_and_args[0]);
 
