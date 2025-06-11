@@ -251,9 +251,9 @@ impl RunCommand {
             })?;
 
         let result = return_type
-            .map(|return_type| {
+            .map(|typ| {
                 let result = result[0].to_wave()?;
-                parse_value_and_type(&return_type, &result).map_err(|e| anyhow!(e))
+                parse_value_and_type(&typ, &result).map_err(|e| anyhow!(e))
             })
             .transpose()?;
 
