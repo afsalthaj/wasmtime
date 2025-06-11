@@ -15,12 +15,10 @@ use golem_rib_repl::{
     WorkerFunctionInvoke,
 };
 use golem_wasm_ast::analysis::AnalysedType;
-use golem_wasm_ast::analysis::analysed_type::tuple;
 use golem_wasm_ast::analysis::wit_parser::WitAnalysisContext;
-use golem_wasm_rpc::{Value, ValueAndType, parse_value_and_type};
+use golem_wasm_rpc::{ValueAndType, parse_value_and_type};
 use rib::{
-    ComponentDependencies, ComponentDependency, ComponentDependencyKey, ParsedFunctionName,
-    ParsedFunctionReference,
+    ComponentDependency, ComponentDependencyKey, ParsedFunctionName, ParsedFunctionReference,
 };
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -126,11 +124,19 @@ impl RibDependencyManager for WasmtimeComponentDependencyManager {
             .get_top_level_exports()
             .map_err(|err| anyhow!(err.reason))?;
 
+        let root_package_name = wit_analysis.root_package_name();
+
+        let root_package_name_str = root_package_name
+            .as_ref()
+            .map(|x| format!("{}:{}", x.namespace, x.name));
+
+        let root_package_version = root_package_name.and_then(|p| p.version.map(|v| v.to_string()));
+
         let component_dependency_key = ComponentDependencyKey {
             component_name: component_name.clone(),
             component_id: Uuid::new_v4(),
-            root_package_name: None,
-            root_package_version: None,
+            root_package_name: root_package_name_str,
+            root_package_version,
         };
 
         let dependency = ComponentDependency::new(component_dependency_key, component_exports);
@@ -236,14 +242,19 @@ impl RunCommand {
             .with_context(|| {
                 format!(
                     "failed to load and invoke component function `{}`",
-                    self.module_and_args[0].to_string_lossy()
+                    self.module_and_args
+                        .iter()
+                        .map(|v| v.to_string_lossy())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 )
             })?;
 
-        let result = result[0].to_wave()?;
-
         let result = return_type
-            .map(|return_type| parse_value_and_type(&return_type, &result).map_err(|e| anyhow!(e)))
+            .map(|return_type| {
+                let result = result[0].to_wave()?;
+                parse_value_and_type(&return_type, &result).map_err(|e| anyhow!(e))
+            })
             .transpose()?;
 
         Ok(result)
