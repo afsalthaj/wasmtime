@@ -6,11 +6,11 @@
 /// has been created through a [`Linker`](wasmtime::component::Linker).
 ///
 /// For more information see [`Path2`] as well.
-pub struct Path2Pre<T> {
+pub struct Path2Pre<T: 'static> {
     instance_pre: wasmtime::component::InstancePre<T>,
     indices: Path2Indices,
 }
-impl<T> Clone for Path2Pre<T> {
+impl<T: 'static> Clone for Path2Pre<T> {
     fn clone(&self) -> Self {
         Self {
             instance_pre: self.instance_pre.clone(),
@@ -18,7 +18,7 @@ impl<T> Clone for Path2Pre<T> {
         }
     }
 }
-impl<_T> Path2Pre<_T> {
+impl<_T: 'static> Path2Pre<_T> {
     /// Creates a new copy of `Path2Pre` bindings which can then
     /// be used to instantiate into a particular store.
     ///
@@ -144,15 +144,16 @@ const _: () = {
             let indices = Path2Indices::new(&instance.instance_pre(&store))?;
             indices.load(&mut store, instance)
         }
-        pub fn add_to_linker<T, U>(
+        pub fn add_to_linker<T, D>(
             linker: &mut wasmtime::component::Linker<T>,
-            get: impl Fn(&mut T) -> &mut U + Send + Sync + Copy + 'static,
+            host_getter: fn(&mut T) -> D::Data<'_>,
         ) -> wasmtime::Result<()>
         where
-            T: Send,
-            U: paths::path2::test::Host + Send,
+            D: wasmtime::component::HasData,
+            for<'a> D::Data<'a>: paths::path2::test::Host + Send,
+            T: 'static + Send,
         {
-            paths::path2::test::add_to_linker(linker, get)?;
+            paths::path2::test::add_to_linker::<T, D>(linker, host_getter)?;
             Ok(())
         }
     }
@@ -165,28 +166,19 @@ pub mod paths {
             use wasmtime::component::__internal::{anyhow, Box};
             #[wasmtime::component::__internal::trait_variant_make(::core::marker::Send)]
             pub trait Host: Send {}
-            pub fn add_to_linker_get_host<T, G>(
+            impl<_T: Host + ?Sized + Send> Host for &mut _T {}
+            pub fn add_to_linker<T, D>(
                 linker: &mut wasmtime::component::Linker<T>,
-                host_getter: G,
+                host_getter: fn(&mut T) -> D::Data<'_>,
             ) -> wasmtime::Result<()>
             where
-                G: for<'a> wasmtime::component::GetHost<&'a mut T, Host: Host + Send>,
-                T: Send,
+                D: wasmtime::component::HasData,
+                for<'a> D::Data<'a>: Host,
+                T: 'static + Send,
             {
                 let mut inst = linker.instance("paths:path2/test")?;
                 Ok(())
             }
-            pub fn add_to_linker<T, U>(
-                linker: &mut wasmtime::component::Linker<T>,
-                get: impl Fn(&mut T) -> &mut U + Send + Sync + Copy + 'static,
-            ) -> wasmtime::Result<()>
-            where
-                U: Host + Send,
-                T: Send,
-            {
-                add_to_linker_get_host(linker, get)
-            }
-            impl<_T: Host + ?Sized + Send> Host for &mut _T {}
         }
     }
 }

@@ -6,11 +6,11 @@
 /// has been created through a [`Linker`](wasmtime::component::Linker).
 ///
 /// For more information see [`W`] as well.
-pub struct WPre<T> {
+pub struct WPre<T: 'static> {
     instance_pre: wasmtime::component::InstancePre<T>,
     indices: WIndices,
 }
-impl<T> Clone for WPre<T> {
+impl<T: 'static> Clone for WPre<T> {
     fn clone(&self) -> Self {
         Self {
             instance_pre: self.instance_pre.clone(),
@@ -18,7 +18,7 @@ impl<T> Clone for WPre<T> {
         }
     }
 }
-impl<_T> WPre<_T> {
+impl<_T: 'static> WPre<_T> {
     /// Creates a new copy of `WPre` bindings which can then
     /// be used to instantiate into a particular store.
     ///
@@ -174,14 +174,16 @@ const _: () = {
             let indices = WIndices::new(&instance.instance_pre(&store))?;
             indices.load(&mut store, instance)
         }
-        pub fn add_to_linker<T, U>(
+        pub fn add_to_linker<T, D>(
             linker: &mut wasmtime::component::Linker<T>,
-            get: impl Fn(&mut T) -> &mut U + Send + Sync + Copy + 'static,
+            host_getter: fn(&mut T) -> D::Data<'_>,
         ) -> wasmtime::Result<()>
         where
-            U: foo::foo::transitive_import::Host,
+            D: wasmtime::component::HasData,
+            for<'a> D::Data<'a>: foo::foo::transitive_import::Host,
+            T: 'static,
         {
-            foo::foo::transitive_import::add_to_linker(linker, get)?;
+            foo::foo::transitive_import::add_to_linker::<T, D>(linker, host_getter)?;
             Ok(())
         }
         pub fn foo_foo_simple_export(&self) -> &exports::foo::foo::simple_export::Guest {
@@ -211,7 +213,7 @@ pub mod foo {
             #[allow(unused_imports)]
             use wasmtime::component::__internal::{anyhow, Box};
             pub enum Y {}
-            pub trait HostY: Sized {
+            pub trait HostY {
                 fn drop(
                     &mut self,
                     rep: wasmtime::component::Resource<Y>,
@@ -225,13 +227,16 @@ pub mod foo {
                     HostY::drop(*self, rep)
                 }
             }
-            pub trait Host: HostY + Sized {}
-            pub fn add_to_linker_get_host<T, G>(
+            pub trait Host: HostY {}
+            impl<_T: Host + ?Sized> Host for &mut _T {}
+            pub fn add_to_linker<T, D>(
                 linker: &mut wasmtime::component::Linker<T>,
-                host_getter: G,
+                host_getter: fn(&mut T) -> D::Data<'_>,
             ) -> wasmtime::Result<()>
             where
-                G: for<'a> wasmtime::component::GetHost<&'a mut T, Host: Host>,
+                D: wasmtime::component::HasData,
+                for<'a> D::Data<'a>: Host,
+                T: 'static,
             {
                 let mut inst = linker.instance("foo:foo/transitive-import")?;
                 inst.resource(
@@ -246,16 +251,6 @@ pub mod foo {
                 )?;
                 Ok(())
             }
-            pub fn add_to_linker<T, U>(
-                linker: &mut wasmtime::component::Linker<T>,
-                get: impl Fn(&mut T) -> &mut U + Send + Sync + Copy + 'static,
-            ) -> wasmtime::Result<()>
-            where
-                U: Host,
-            {
-                add_to_linker_get_host(linker, get)
-            }
-            impl<_T: Host + ?Sized> Host for &mut _T {}
         }
     }
 }

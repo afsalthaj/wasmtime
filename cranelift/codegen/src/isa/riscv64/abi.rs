@@ -5,21 +5,21 @@ use crate::ir::types::*;
 
 use crate::isa;
 
-use crate::isa::riscv64::inst::*;
 use crate::isa::CallConv;
+use crate::isa::riscv64::inst::*;
 use crate::machinst::*;
 
+use crate::CodegenResult;
 use crate::ir::LibCall;
 use crate::ir::Signature;
 use crate::isa::riscv64::settings::Flags as RiscvFlags;
 use crate::isa::unwind::UnwindInst;
 use crate::settings;
-use crate::CodegenResult;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use regalloc2::{MachineEnv, PReg, PRegSet};
 
-use smallvec::{smallvec, SmallVec};
+use smallvec::{SmallVec, smallvec};
 use std::borrow::ToOwned;
 use std::sync::OnceLock;
 
@@ -566,7 +566,7 @@ impl ABIMachineSpec for Riscv64MachineDeps {
         let arg1 = Writable::from_reg(x_reg(11));
         let arg2 = Writable::from_reg(x_reg(12));
         let tmp = alloc_tmp(Self::word_type());
-        insts.extend(Inst::load_constant_u64(tmp, size as u64).into_iter());
+        insts.extend(Inst::load_constant_u64(tmp, size as u64));
         insts.push(Inst::Call {
             info: Box::new(CallInfo {
                 dest: ExternalName::LibCall(LibCall::Memcpy),

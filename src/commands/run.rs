@@ -8,7 +8,7 @@
 use crate::common::{Profile, RunCommon, RunTarget};
 use async_trait::async_trait;
 
-use anyhow::{anyhow, bail, Context as _, Error, Result};
+use anyhow::{Context as _, Error, Result, anyhow, bail};
 use clap::Parser;
 use golem_rib_repl::{
     ComponentSource, ReplDependencies, RibComponentMetadata, RibDependencyManager, RibRepl,
@@ -25,6 +25,8 @@ use golem_wasm_ast::analysis::AnalysedType;
 use rib::{ParsedFunctionName, ParsedFunctionReference};
 use uuid::Uuid;
 use wasi_common::sync::{ambient_authority, Dir, TcpListener, WasiCtxBuilder};
+use std::thread;
+use wasi_common::sync::{Dir, TcpListener, WasiCtxBuilder, ambient_authority};
 use wasmtime::{Engine, Func, Module, Store, StoreLimits, Val, ValType};
 use wasmtime_wasi::p2::{IoView, WasiView};
 
@@ -38,7 +40,7 @@ use wasmtime_wasi_threads::WasiThreadsCtx;
 use wasmtime_wasi_config::{WasiConfig, WasiConfigVariables};
 #[cfg(feature = "wasi-http")]
 use wasmtime_wasi_http::{
-    WasiHttpCtx, DEFAULT_OUTGOING_BODY_BUFFER_CHUNKS, DEFAULT_OUTGOING_BODY_CHUNK_SIZE,
+    DEFAULT_OUTGOING_BODY_BUFFER_CHUNKS, DEFAULT_OUTGOING_BODY_CHUNK_SIZE, WasiHttpCtx,
 };
 #[cfg(feature = "wasi-keyvalue")]
 use wasmtime_wasi_keyvalue::{WasiKeyValue, WasiKeyValueCtx, WasiKeyValueCtxBuilder};
@@ -546,9 +548,11 @@ impl RunCommand {
 
         store.set_epoch_deadline(1);
         let engine = store.engine().clone();
-        thread::spawn(move || loop {
-            thread::sleep(interval);
-            engine.increment_epoch();
+        thread::spawn(move || {
+            loop {
+                thread::sleep(interval);
+                engine.increment_epoch();
+            }
         });
 
         let path = path.to_string();
@@ -703,6 +707,7 @@ impl RunCommand {
         result
     }
 
+    #[cfg(feature = "component-model")]
     async fn invoke_component(
         &self,
         store: &mut Store<Host>,
@@ -730,9 +735,14 @@ impl RunCommand {
         linker: &mut wasmtime::component::Linker<Host>,
     ) -> Result<Vec<wasmtime::component::Val>> {
         use wasmtime::component::{
+            Val,
             types::ComponentItem,
             wasm_wave::{untyped::UntypedFuncCall, wasm::WasmFunc},
             Val,
+            wasm_wave::{
+                untyped::UntypedFuncCall,
+                wasm::{DisplayFuncResults, WasmFunc},
+            },
         };
 
         let untyped_call = UntypedFuncCall::parse(invoke).with_context(|| {
@@ -743,11 +753,13 @@ impl RunCommand {
 
         let name = untyped_call.name();
         let matches = Self::search_component(store.engine(), component.component_type(), name);
-        match matches.len()  {
-                        0 => bail!("No export named `{name}` in component."),
-                        1 => {}
-                        _ => bail!("Multiple exports named `{name}`: {matches:?}. FIXME: support some way to disambiguate names"),
-                    };
+        match matches.len() {
+            0 => bail!("No export named `{name}` in component."),
+            1 => {}
+            _ => bail!(
+                "Multiple exports named `{name}`: {matches:?}. FIXME: support some way to disambiguate names"
+            ),
+        };
         let (params, result_len, export) = match &matches[0] {
             (names, ComponentItem::ComponentFunc(func)) => {
                 let param_types = WasmFunc::params(func).collect::<Vec<_>>();
@@ -1072,7 +1084,9 @@ impl RunCommand {
         if self.run.common.wasi.keyvalue == Some(true) {
             #[cfg(not(feature = "wasi-keyvalue"))]
             {
-                bail!("Cannot enable wasi-keyvalue when the binary is not compiled with this feature.");
+                bail!(
+                    "Cannot enable wasi-keyvalue when the binary is not compiled with this feature."
+                );
             }
             #[cfg(all(feature = "wasi-keyvalue", feature = "component-model"))]
             {

@@ -6,11 +6,11 @@
 /// has been created through a [`Linker`](wasmtime::component::Linker).
 ///
 /// For more information see [`MyWorld`] as well.
-pub struct MyWorldPre<T> {
+pub struct MyWorldPre<T: 'static> {
     instance_pre: wasmtime::component::InstancePre<T>,
     indices: MyWorldIndices,
 }
-impl<T> Clone for MyWorldPre<T> {
+impl<T: 'static> Clone for MyWorldPre<T> {
     fn clone(&self) -> Self {
         Self {
             instance_pre: self.instance_pre.clone(),
@@ -18,7 +18,7 @@ impl<T> Clone for MyWorldPre<T> {
         }
     }
 }
-impl<_T> MyWorldPre<_T> {
+impl<_T: 'static> MyWorldPre<_T> {
     /// Creates a new copy of `MyWorldPre` bindings which can then
     /// be used to instantiate into a particular store.
     ///
@@ -146,14 +146,16 @@ const _: () = {
             let indices = MyWorldIndices::new(&instance.instance_pre(&store))?;
             indices.load(&mut store, instance)
         }
-        pub fn add_to_linker<T, U>(
+        pub fn add_to_linker<T, D>(
             linker: &mut wasmtime::component::Linker<T>,
-            get: impl Fn(&mut T) -> &mut U + Send + Sync + Copy + 'static,
+            host_getter: fn(&mut T) -> D::Data<'_>,
         ) -> wasmtime::Result<()>
         where
-            U: foo::foo::simple_lists::Host,
+            D: wasmtime::component::HasData,
+            for<'a> D::Data<'a>: foo::foo::simple_lists::Host,
+            T: 'static,
         {
-            foo::foo::simple_lists::add_to_linker(linker, get)?;
+            foo::foo::simple_lists::add_to_linker::<T, D>(linker, host_getter)?;
             Ok(())
         }
         pub fn foo_foo_simple_lists(&self) -> &exports::foo::foo::simple_lists::Guest {
@@ -190,12 +192,45 @@ pub mod foo {
                     wasmtime::component::__internal::Vec<u32>,
                 >;
             }
-            pub fn add_to_linker_get_host<T, G>(
+            impl<_T: Host + ?Sized> Host for &mut _T {
+                fn simple_list1(
+                    &mut self,
+                    l: wasmtime::component::__internal::Vec<u32>,
+                ) -> () {
+                    Host::simple_list1(*self, l)
+                }
+                fn simple_list2(&mut self) -> wasmtime::component::__internal::Vec<u32> {
+                    Host::simple_list2(*self)
+                }
+                fn simple_list3(
+                    &mut self,
+                    a: wasmtime::component::__internal::Vec<u32>,
+                    b: wasmtime::component::__internal::Vec<u32>,
+                ) -> (
+                    wasmtime::component::__internal::Vec<u32>,
+                    wasmtime::component::__internal::Vec<u32>,
+                ) {
+                    Host::simple_list3(*self, a, b)
+                }
+                fn simple_list4(
+                    &mut self,
+                    l: wasmtime::component::__internal::Vec<
+                        wasmtime::component::__internal::Vec<u32>,
+                    >,
+                ) -> wasmtime::component::__internal::Vec<
+                    wasmtime::component::__internal::Vec<u32>,
+                > {
+                    Host::simple_list4(*self, l)
+                }
+            }
+            pub fn add_to_linker<T, D>(
                 linker: &mut wasmtime::component::Linker<T>,
-                host_getter: G,
+                host_getter: fn(&mut T) -> D::Data<'_>,
             ) -> wasmtime::Result<()>
             where
-                G: for<'a> wasmtime::component::GetHost<&'a mut T, Host: Host>,
+                D: wasmtime::component::HasData,
+                for<'a> D::Data<'a>: Host,
+                T: 'static,
             {
                 let mut inst = linker.instance("foo:foo/simple-lists")?;
                 inst.func_wrap(
@@ -252,46 +287,6 @@ pub mod foo {
                     },
                 )?;
                 Ok(())
-            }
-            pub fn add_to_linker<T, U>(
-                linker: &mut wasmtime::component::Linker<T>,
-                get: impl Fn(&mut T) -> &mut U + Send + Sync + Copy + 'static,
-            ) -> wasmtime::Result<()>
-            where
-                U: Host,
-            {
-                add_to_linker_get_host(linker, get)
-            }
-            impl<_T: Host + ?Sized> Host for &mut _T {
-                fn simple_list1(
-                    &mut self,
-                    l: wasmtime::component::__internal::Vec<u32>,
-                ) -> () {
-                    Host::simple_list1(*self, l)
-                }
-                fn simple_list2(&mut self) -> wasmtime::component::__internal::Vec<u32> {
-                    Host::simple_list2(*self)
-                }
-                fn simple_list3(
-                    &mut self,
-                    a: wasmtime::component::__internal::Vec<u32>,
-                    b: wasmtime::component::__internal::Vec<u32>,
-                ) -> (
-                    wasmtime::component::__internal::Vec<u32>,
-                    wasmtime::component::__internal::Vec<u32>,
-                ) {
-                    Host::simple_list3(*self, a, b)
-                }
-                fn simple_list4(
-                    &mut self,
-                    l: wasmtime::component::__internal::Vec<
-                        wasmtime::component::__internal::Vec<u32>,
-                    >,
-                ) -> wasmtime::component::__internal::Vec<
-                    wasmtime::component::__internal::Vec<u32>,
-                > {
-                    Host::simple_list4(*self, l)
-                }
             }
         }
     }

@@ -18,8 +18,8 @@ pub use self::signals::*;
 use crate::runtime::module::lookup_code;
 use crate::runtime::store::{ExecutorRef, StoreOpaque};
 use crate::runtime::vm::sys::traphandlers;
-use crate::runtime::vm::{f32x4, f64x2, i8x16, InterpreterRef, VMContext, VMStoreContext};
-use crate::{prelude::*, EntryStoreContext};
+use crate::runtime::vm::{InterpreterRef, VMContext, VMStoreContext, f32x4, f64x2, i8x16};
+use crate::{EntryStoreContext, prelude::*};
 use crate::{StoreContextMut, WasmBacktrace};
 use core::cell::Cell;
 use core::num::NonZeroU32;
@@ -27,6 +27,9 @@ use core::ops::Range;
 use core::ptr::{self, NonNull};
 
 pub use self::backtrace::Backtrace;
+#[cfg(feature = "gc")]
+pub use wasmtime_unwinder::Frame;
+
 pub use self::coredump::CoreDumpStack;
 pub use self::tls::tls_eager_initialize;
 #[cfg(feature = "async")]
@@ -305,6 +308,14 @@ unsafe impl HostResultHasUnwindSentinel for core::convert::Infallible {
     }
 }
 
+unsafe impl HostResultHasUnwindSentinel for bool {
+    type Abi = u32;
+    const SENTINEL: Self::Abi = u32::MAX;
+    fn into_abi(self) -> Self::Abi {
+        u32::from(self)
+    }
+}
+
 /// Stores trace message with backtrace.
 #[derive(Debug)]
 pub struct Trap {
@@ -429,8 +440,8 @@ where
 // usage of its accessor methods.
 mod call_thread_state {
     use super::*;
-    use crate::runtime::vm::Unwind;
     use crate::EntryStoreContext;
+    use crate::runtime::vm::{Unwind, VMStackChain};
 
     /// Temporary state stored on the stack which is registered in the `tls`
     /// module below for calls into wasm.
@@ -530,6 +541,11 @@ mod call_thread_state {
         /// Get the saved FP upon entry into Wasm for the previous `CallThreadState`.
         pub unsafe fn old_last_wasm_entry_fp(&self) -> usize {
             (&*self.old_state).last_wasm_entry_fp
+        }
+
+        /// Get the saved `VMStackChain` for the previous `CallThreadState`.
+        pub unsafe fn old_stack_chain(&self) -> VMStackChain {
+            (&*self.old_state).stack_chain.clone()
         }
 
         /// Get the previous `CallThreadState`.
@@ -867,7 +883,6 @@ pub(crate) mod tls {
     // these functions are free to be inlined.
     pub(super) mod raw {
         use super::CallThreadState;
-        use sptr::Strict;
 
         pub type Ptr = *const CallThreadState;
 
@@ -877,7 +892,7 @@ pub(crate) mod tls {
 
         fn tls_get() -> (Ptr, bool) {
             let mut initialized = false;
-            let p = Strict::map_addr(crate::runtime::vm::sys::tls_get(), |a| {
+            let p = crate::runtime::vm::sys::tls_get().map_addr(|a| {
                 initialized = (a & 1) != 0;
                 a & !1
             });
@@ -885,7 +900,7 @@ pub(crate) mod tls {
         }
 
         fn tls_set(ptr: Ptr, initialized: bool) {
-            let encoded = Strict::map_addr(ptr, |a| a | usize::from(initialized));
+            let encoded = ptr.map_addr(|a| a | usize::from(initialized));
             crate::runtime::vm::sys::tls_set(encoded.cast_mut().cast::<u8>());
         }
 

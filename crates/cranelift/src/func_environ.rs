@@ -14,6 +14,7 @@ use cranelift_codegen::ir::types::*;
 use cranelift_codegen::ir::{self, types};
 use cranelift_codegen::ir::{ArgumentPurpose, ConstantData, Function, InstBuilder, MemFlags};
 use cranelift_codegen::isa::{TargetFrontendConfig, TargetIsa};
+use cranelift_entity::packed_option::ReservedValue;
 use cranelift_entity::{EntityRef, PrimaryMap, SecondaryMap};
 use cranelift_frontend::Variable;
 use cranelift_frontend::{FuncInstBuilder, FunctionBuilder};
@@ -28,6 +29,7 @@ use wasmtime_environ::{
     WasmResult, WasmValType,
 };
 use wasmtime_environ::{FUNCREF_INIT_BIT, FUNCREF_MASK};
+use wasmtime_math::f64_cvt_to_int_bounds;
 
 #[derive(Debug)]
 pub(crate) enum Extension {
@@ -214,9 +216,9 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
             builtin_functions,
             offsets: VMOffsets::new(compiler.isa().pointer_bytes(), &translation.module),
             tunables,
-            fuel_var: Variable::new(0),
-            epoch_deadline_var: Variable::new(0),
-            epoch_ptr_var: Variable::new(0),
+            fuel_var: Variable::reserved_value(),
+            epoch_deadline_var: Variable::reserved_value(),
+            epoch_ptr_var: Variable::reserved_value(),
 
             // Start with at least one fuel being consumed because even empty
             // functions should consume at least some fuel.
@@ -351,7 +353,8 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
         // `self.fuel_var` to make fuel modifications fast locally. This cache
         // is then periodically flushed to the Store-defined location in
         // `VMStoreContext` later.
-        builder.declare_var(self.fuel_var, ir::types::I64);
+        debug_assert!(self.fuel_var.is_reserved_value());
+        self.fuel_var = builder.declare_var(ir::types::I64);
         self.fuel_load_into_var(builder);
         self.fuel_check(builder);
     }
@@ -564,10 +567,12 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
     }
 
     fn epoch_function_entry(&mut self, builder: &mut FunctionBuilder<'_>) {
-        builder.declare_var(self.epoch_deadline_var, ir::types::I64);
+        debug_assert!(self.epoch_deadline_var.is_reserved_value());
+        self.epoch_deadline_var = builder.declare_var(ir::types::I64);
         // Let epoch_check_full load the current deadline and call def_var
 
-        builder.declare_var(self.epoch_ptr_var, self.pointer_type());
+        debug_assert!(self.epoch_ptr_var.is_reserved_value());
+        self.epoch_ptr_var = builder.declare_var(self.pointer_type());
         let epoch_ptr = self.epoch_ptr(builder);
         builder.def_var(self.epoch_ptr_var, epoch_ptr);
 
@@ -1157,8 +1162,7 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
         builder: &mut FunctionBuilder,
         ty: ir::Type,
         val: ir::Value,
-        range32: (f64, f64),
-        range64: (f64, f64),
+        signed: bool,
     ) {
         assert!(!self.clif_instruction_traps_enabled());
         let val_ty = builder.func.dfg.value_type(val);
@@ -1170,11 +1174,7 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
         let isnan = builder.ins().fcmp(FloatCC::NotEqual, val, val);
         self.trapnz(builder, isnan, ir::TrapCode::BAD_CONVERSION_TO_INTEGER);
         let val = self.trunc_f64(builder, val);
-        let (lower_bound, upper_bound) = match ty {
-            I32 => range32,
-            I64 => range64,
-            _ => unreachable!(),
-        };
+        let (lower_bound, upper_bound) = f64_cvt_to_int_bounds(signed, ty.bits());
         let lower_bound = builder.ins().f64const(lower_bound);
         let too_small = builder
             .ins()
@@ -1806,12 +1806,6 @@ impl FuncEnvironment<'_> {
         let sig_ref = func.dfg.ext_funcs[func_ref].signature;
         let wasm_func_ty = self.sig_ref_to_ty[sig_ref].as_ref().unwrap();
         wasm_func_ty.returns()[index].is_vmgcref_type_and_not_i31()
-    }
-
-    pub fn after_locals(&mut self, num_locals: usize) {
-        self.fuel_var = Variable::new(num_locals);
-        self.epoch_deadline_var = Variable::new(num_locals + 1);
-        self.epoch_ptr_var = Variable::new(num_locals + 2);
     }
 
     pub fn translate_table_grow(
@@ -3734,13 +3728,7 @@ impl FuncEnvironment<'_> {
         // NB: for now avoid translating this entire instruction to CLIF and
         // just do it in a libcall.
         if !self.clif_instruction_traps_enabled() {
-            self.guard_fcvt_to_int(
-                builder,
-                ty,
-                val,
-                (-2147483649.0, 2147483648.0),
-                (-9223372036854777856.0, 9223372036854775808.0),
-            );
+            self.guard_fcvt_to_int(builder, ty, val, true);
         }
         builder.ins().fcvt_to_sint(ty, val)
     }
@@ -3752,13 +3740,7 @@ impl FuncEnvironment<'_> {
         val: ir::Value,
     ) -> ir::Value {
         if !self.clif_instruction_traps_enabled() {
-            self.guard_fcvt_to_int(
-                builder,
-                ty,
-                val,
-                (-1.0, 4294967296.0),
-                (-1.0, 18446744073709551616.0),
-            );
+            self.guard_fcvt_to_int(builder, ty, val, false);
         }
         builder.ins().fcvt_to_uint(ty, val)
     }
@@ -3808,4 +3790,18 @@ fn index_type_to_ir_type(index_type: IndexType) -> ir::Type {
         IndexType::I32 => I32,
         IndexType::I64 => I64,
     }
+}
+
+/// TODO(10248) This is removed in the next stack switching PR. It stops the
+/// compiler from complaining about the stack switching libcalls being dead
+/// code.
+#[cfg(feature = "stack-switching")]
+#[allow(
+    dead_code,
+    reason = "Dummy function to supress more dead code warnings"
+)]
+pub fn use_stack_switching_libcalls() {
+    let _ = BuiltinFunctions::cont_new;
+    let _ = BuiltinFunctions::table_grow_cont_obj;
+    let _ = BuiltinFunctions::table_fill_cont_obj;
 }

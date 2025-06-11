@@ -1,7 +1,7 @@
 //! S390x ISA definitions: instruction arguments.
 
-use crate::ir::condcodes::{FloatCC, IntCC};
 use crate::ir::MemFlags;
+use crate::ir::condcodes::{FloatCC, IntCC};
 use crate::isa::s390x::inst::*;
 
 //=============================================================================
@@ -31,6 +31,9 @@ pub enum MemArg {
 
     /// PC-relative Reference to a label.
     Label { target: MachLabel },
+
+    /// PC-relative Reference to a constant pool entry.
+    Constant { constant: VCodeConstant },
 
     /// PC-relative Reference to a near symbol.
     Symbol {
@@ -103,6 +106,7 @@ impl MemArg {
             MemArg::BXD20 { flags, .. } => *flags,
             MemArg::RegOffset { flags, .. } => *flags,
             MemArg::Label { .. } => MemFlags::trusted(),
+            MemArg::Constant { .. } => MemFlags::trusted(),
             MemArg::Symbol { flags, .. } => *flags,
             MemArg::InitialSPOffset { .. } => MemFlags::trusted(),
             MemArg::IncomingArgOffset { .. } => MemFlags::trusted(),
@@ -226,6 +230,7 @@ impl PrettyPrint for MemArg {
                 }
             }
             &MemArg::Label { target } => target.to_string(),
+            &MemArg::Constant { constant } => format!("[const({})]", constant.as_u32()),
             &MemArg::Symbol {
                 ref name, offset, ..
             } => format!("{} + {}", name.display(None), offset),

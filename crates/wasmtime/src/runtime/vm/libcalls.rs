@@ -54,15 +54,18 @@
 //! }
 //! ```
 
+#[cfg(feature = "stack-switching")]
+use super::stack_switching::VMContObj;
 use crate::prelude::*;
-use crate::runtime::vm::table::{Table, TableElementType};
-use crate::runtime::vm::vmcontext::VMFuncRef;
 #[cfg(feature = "gc")]
 use crate::runtime::vm::VMGcRef;
+use crate::runtime::vm::table::{Table, TableElementType};
+use crate::runtime::vm::vmcontext::VMFuncRef;
 use crate::runtime::vm::{
-    f32x4, f64x2, i8x16, HostResultHasUnwindSentinel, Instance, TrapReason, VMStore,
+    HostResultHasUnwindSentinel, Instance, TrapReason, VMStore, f32x4, f64x2, i8x16,
 };
 use core::convert::Infallible;
+use core::pin::Pin;
 use core::ptr::NonNull;
 #[cfg(feature = "threads")]
 use core::time::Duration;
@@ -94,7 +97,7 @@ pub mod raw {
     // between doc comments and `cfg`s.
     #![allow(unused_doc_comments, unused_attributes)]
 
-    use crate::runtime::vm::{f32x4, f64x2, i8x16, InstanceAndStore, VMContext};
+    use crate::runtime::vm::{InstanceAndStore, VMContext, f32x4, f64x2, i8x16};
     use core::ptr::NonNull;
 
     macro_rules! libcall {
@@ -168,12 +171,13 @@ pub mod raw {
 
 fn memory32_grow(
     store: &mut dyn VMStore,
-    instance: &mut Instance,
+    mut instance: Pin<&mut Instance>,
     delta: u64,
     memory_index: u32,
 ) -> Result<Option<AllocationSize>, TrapReason> {
     let memory_index = MemoryIndex::from_u32(memory_index);
     let result = instance
+        .as_mut()
         .memory_grow(store, memory_index, delta)?
         .map(|size_in_bytes| {
             AllocationSize(size_in_bytes / instance.memory_page_size(memory_index))
@@ -222,16 +226,17 @@ unsafe impl HostResultHasUnwindSentinel for Option<AllocationSize> {
 /// Implementation of `table.grow` for `funcref` tables.
 unsafe fn table_grow_func_ref(
     store: &mut dyn VMStore,
-    instance: &mut Instance,
+    mut instance: Pin<&mut Instance>,
     table_index: u32,
     delta: u64,
     init_value: *mut u8,
 ) -> Result<Option<AllocationSize>> {
     let table_index = TableIndex::from_u32(table_index);
 
-    let element = match instance.table_element_type(table_index) {
+    let element = match instance.as_mut().table_element_type(table_index) {
         TableElementType::Func => NonNull::new(init_value.cast::<VMFuncRef>()).into(),
         TableElementType::GcRef => unreachable!(),
+        TableElementType::Cont => unreachable!(),
     };
 
     let result = instance
@@ -244,14 +249,14 @@ unsafe fn table_grow_func_ref(
 #[cfg(feature = "gc")]
 unsafe fn table_grow_gc_ref(
     store: &mut dyn VMStore,
-    instance: &mut Instance,
+    mut instance: Pin<&mut Instance>,
     table_index: u32,
     delta: u64,
     init_value: u32,
 ) -> Result<Option<AllocationSize>> {
     let table_index = TableIndex::from_u32(table_index);
 
-    let element = match instance.table_element_type(table_index) {
+    let element = match instance.as_mut().table_element_type(table_index) {
         TableElementType::Func => unreachable!(),
         TableElementType::GcRef => VMGcRef::from_raw_u32(init_value)
             .map(|r| {
@@ -261,6 +266,33 @@ unsafe fn table_grow_gc_ref(
                     .clone_gc_ref(&r)
             })
             .into(),
+        TableElementType::Cont => unreachable!(),
+    };
+
+    let result = instance
+        .table_grow(store, table_index, delta, element)?
+        .map(AllocationSize);
+    Ok(result)
+}
+
+#[cfg(feature = "stack-switching")]
+unsafe fn table_grow_cont_obj(
+    store: &mut dyn VMStore,
+    mut instance: Pin<&mut Instance>,
+    table_index: u32,
+    delta: u64,
+    // The following two values together form the intitial Option<VMContObj>.
+    // A None value is indicated by the pointer being null.
+    init_value_contref: *mut u8,
+    init_value_revision: u64,
+) -> Result<Option<AllocationSize>> {
+    let init_value = VMContObj::from_raw_parts(init_value_contref, init_value_revision);
+
+    let table_index = TableIndex::from_u32(table_index);
+
+    let element = match instance.as_mut().table_element_type(table_index) {
+        TableElementType::Cont => init_value.into(),
+        _ => panic!("Wrong table growing function"),
     };
 
     let result = instance
@@ -272,7 +304,7 @@ unsafe fn table_grow_gc_ref(
 /// Implementation of `table.fill` for `funcref`s.
 unsafe fn table_fill_func_ref(
     store: &mut dyn VMStore,
-    instance: &mut Instance,
+    instance: Pin<&mut Instance>,
     table_index: u32,
     dst: u64,
     val: *mut u8,
@@ -287,13 +319,14 @@ unsafe fn table_fill_func_ref(
             Ok(())
         }
         TableElementType::GcRef => unreachable!(),
+        TableElementType::Cont => unreachable!(),
     }
 }
 
 #[cfg(feature = "gc")]
 unsafe fn table_fill_gc_ref(
     store: &mut dyn VMStore,
-    instance: &mut Instance,
+    instance: Pin<&mut Instance>,
     table_index: u32,
     dst: u64,
     val: u32,
@@ -310,13 +343,37 @@ unsafe fn table_fill_gc_ref(
             table.fill(Some(gc_store), dst, gc_ref.into(), len)?;
             Ok(())
         }
+
+        TableElementType::Cont => unreachable!(),
+    }
+}
+
+#[cfg(feature = "stack-switching")]
+unsafe fn table_fill_cont_obj(
+    store: &mut dyn VMStore,
+    instance: Pin<&mut Instance>,
+    table_index: u32,
+    dst: u64,
+    value_contref: *mut u8,
+    value_revision: u64,
+    len: u64,
+) -> Result<()> {
+    let table_index = TableIndex::from_u32(table_index);
+    let table = &mut *instance.get_table(table_index);
+    match table.element_type() {
+        TableElementType::Cont => {
+            let contobj = VMContObj::from_raw_parts(value_contref, value_revision);
+            table.fill(store.optional_gc_store_mut(), dst, contobj.into(), len)?;
+            Ok(())
+        }
+        _ => panic!("Wrong table filling function"),
     }
 }
 
 // Implementation of `table.copy`.
 unsafe fn table_copy(
     store: &mut dyn VMStore,
-    instance: &mut Instance,
+    mut instance: Pin<&mut Instance>,
     dst_table_index: u32,
     src_table_index: u32,
     dst: u64,
@@ -326,7 +383,7 @@ unsafe fn table_copy(
     let dst_table_index = TableIndex::from_u32(dst_table_index);
     let src_table_index = TableIndex::from_u32(src_table_index);
     let store = store.store_opaque_mut();
-    let dst_table = instance.get_table(dst_table_index);
+    let dst_table = instance.as_mut().get_table(dst_table_index);
     // Lazy-initialize the whole range in the source table first.
     let src_range = src..(src.checked_add(len).unwrap_or(u64::MAX));
     let src_table = instance.get_table_with_lazy_init(src_table_index, src_range);
@@ -338,7 +395,7 @@ unsafe fn table_copy(
 // Implementation of `table.init`.
 fn table_init(
     store: &mut dyn VMStore,
-    instance: &mut Instance,
+    instance: Pin<&mut Instance>,
     table_index: u32,
     elem_index: u32,
     dst: u64,
@@ -358,7 +415,7 @@ fn table_init(
 }
 
 // Implementation of `elem.drop`.
-fn elem_drop(_store: &mut dyn VMStore, instance: &mut Instance, elem_index: u32) {
+fn elem_drop(_store: &mut dyn VMStore, instance: Pin<&mut Instance>, elem_index: u32) {
     let elem_index = ElemIndex::from_u32(elem_index);
     instance.elem_drop(elem_index)
 }
@@ -366,7 +423,7 @@ fn elem_drop(_store: &mut dyn VMStore, instance: &mut Instance, elem_index: u32)
 // Implementation of `memory.copy`.
 fn memory_copy(
     _store: &mut dyn VMStore,
-    instance: &mut Instance,
+    instance: Pin<&mut Instance>,
     dst_index: u32,
     dst: u64,
     src_index: u32,
@@ -381,7 +438,7 @@ fn memory_copy(
 // Implementation of `memory.fill` for locally defined memories.
 fn memory_fill(
     _store: &mut dyn VMStore,
-    instance: &mut Instance,
+    instance: Pin<&mut Instance>,
     memory_index: u32,
     dst: u64,
     val: u32,
@@ -395,7 +452,7 @@ fn memory_fill(
 // Implementation of `memory.init`.
 fn memory_init(
     _store: &mut dyn VMStore,
-    instance: &mut Instance,
+    instance: Pin<&mut Instance>,
     memory_index: u32,
     data_index: u32,
     dst: u64,
@@ -408,7 +465,11 @@ fn memory_init(
 }
 
 // Implementation of `ref.func`.
-fn ref_func(_store: &mut dyn VMStore, instance: &mut Instance, func_index: u32) -> NonNull<u8> {
+fn ref_func(
+    _store: &mut dyn VMStore,
+    instance: Pin<&mut Instance>,
+    func_index: u32,
+) -> NonNull<u8> {
     instance
         .get_func_ref(FuncIndex::from_u32(func_index))
         .expect("ref_func: funcref should always be available for given func index")
@@ -416,7 +477,7 @@ fn ref_func(_store: &mut dyn VMStore, instance: &mut Instance, func_index: u32) 
 }
 
 // Implementation of `data.drop`.
-fn data_drop(_store: &mut dyn VMStore, instance: &mut Instance, data_index: u32) {
+fn data_drop(_store: &mut dyn VMStore, instance: Pin<&mut Instance>, data_index: u32) {
     let data_index = DataIndex::from_u32(data_index);
     instance.data_drop(data_index)
 }
@@ -424,7 +485,7 @@ fn data_drop(_store: &mut dyn VMStore, instance: &mut Instance, data_index: u32)
 // Returns a table entry after lazily initializing it.
 unsafe fn table_get_lazy_init_func_ref(
     _store: &mut dyn VMStore,
-    instance: &mut Instance,
+    instance: Pin<&mut Instance>,
     table_index: u32,
     index: u64,
 ) -> *mut u8 {
@@ -442,7 +503,7 @@ unsafe fn table_get_lazy_init_func_ref(
 
 /// Drop a GC reference.
 #[cfg(feature = "gc-drc")]
-unsafe fn drop_gc_ref(store: &mut dyn VMStore, _instance: &mut Instance, gc_ref: u32) {
+unsafe fn drop_gc_ref(store: &mut dyn VMStore, _instance: Pin<&mut Instance>, gc_ref: u32) {
     log::trace!("libcalls::drop_gc_ref({gc_ref:#x})");
     let gc_ref = VMGcRef::from_raw_u32(gc_ref).expect("non-null VMGcRef");
     store
@@ -455,7 +516,7 @@ unsafe fn drop_gc_ref(store: &mut dyn VMStore, _instance: &mut Instance, gc_ref:
 #[cfg(feature = "gc-null")]
 unsafe fn grow_gc_heap(
     store: &mut dyn VMStore,
-    _instance: &mut Instance,
+    _instance: Pin<&mut Instance>,
     bytes_needed: u64,
 ) -> Result<()> {
     let orig_len = u64::try_from(store.gc_store()?.gc_heap.vmmemory().current_length()).unwrap();
@@ -481,7 +542,7 @@ unsafe fn grow_gc_heap(
 /// Do a GC, keeping `gc_ref` rooted and returning the updated `gc_ref`
 /// reference.
 #[cfg(feature = "gc-drc")]
-unsafe fn gc(store: &mut dyn VMStore, _instance: &mut Instance, gc_ref: u32) -> Result<u32> {
+unsafe fn gc(store: &mut dyn VMStore, _instance: Pin<&mut Instance>, gc_ref: u32) -> Result<u32> {
     let gc_ref = VMGcRef::from_raw_u32(gc_ref);
     let gc_ref = gc_ref.map(|r| {
         store
@@ -521,7 +582,7 @@ unsafe fn gc(store: &mut dyn VMStore, _instance: &mut Instance, gc_ref: u32) -> 
 #[cfg(feature = "gc-drc")]
 unsafe fn gc_alloc_raw(
     store: &mut dyn VMStore,
-    instance: &mut Instance,
+    instance: Pin<&mut Instance>,
     kind_and_reserved: u32,
     module_interned_type_index: u32,
     size: u32,
@@ -575,7 +636,7 @@ unsafe fn gc_alloc_raw(
 #[cfg(feature = "gc")]
 unsafe fn intern_func_ref_for_gc_heap(
     store: &mut dyn VMStore,
-    _instance: &mut Instance,
+    _instance: Pin<&mut Instance>,
     func_ref: *mut u8,
 ) -> Result<u32> {
     use crate::{store::AutoAssertNoGc, vm::SendSyncPtr};
@@ -597,13 +658,13 @@ unsafe fn intern_func_ref_for_gc_heap(
 #[cfg(feature = "gc")]
 unsafe fn get_interned_func_ref(
     store: &mut dyn VMStore,
-    instance: &mut Instance,
+    instance: Pin<&mut Instance>,
     func_ref_id: u32,
     module_interned_type_index: u32,
 ) -> *mut u8 {
     use super::FuncRefTableId;
     use crate::store::AutoAssertNoGc;
-    use wasmtime_environ::{packed_option::ReservedValue, ModuleInternedTypeIndex};
+    use wasmtime_environ::{ModuleInternedTypeIndex, packed_option::ReservedValue};
 
     let store = AutoAssertNoGc::new(store.store_opaque_mut());
 
@@ -631,7 +692,7 @@ unsafe fn get_interned_func_ref(
 #[cfg(feature = "gc")]
 unsafe fn array_new_data(
     store: &mut dyn VMStore,
-    instance: &mut Instance,
+    instance: Pin<&mut Instance>,
     array_type_index: u32,
     data_index: u32,
     src: u32,
@@ -697,7 +758,7 @@ unsafe fn array_new_data(
 #[cfg(feature = "gc")]
 unsafe fn array_init_data(
     store: &mut dyn VMStore,
-    instance: &mut Instance,
+    instance: Pin<&mut Instance>,
     array_type_index: u32,
     array: u32,
     dst: u32,
@@ -778,16 +839,16 @@ unsafe fn array_init_data(
 #[cfg(feature = "gc")]
 unsafe fn array_new_elem(
     store: &mut dyn VMStore,
-    instance: &mut Instance,
+    instance: Pin<&mut Instance>,
     array_type_index: u32,
     elem_index: u32,
     src: u32,
     len: u32,
 ) -> Result<core::num::NonZeroU32> {
     use crate::{
+        ArrayRef, ArrayRefPre, ArrayType, Func, RootSet, RootedGcRefImpl, Val,
         store::AutoAssertNoGc,
         vm::const_expr::{ConstEvalContext, ConstExprEvaluator},
-        ArrayRef, ArrayRefPre, ArrayType, Func, RootSet, RootedGcRefImpl, Val,
     };
     use wasmtime_environ::{ModuleInternedTypeIndex, TableSegmentElements};
 
@@ -829,7 +890,7 @@ unsafe fn array_new_elem(
                     .and_then(|s| s.get(..len))
                     .ok_or_else(|| Trap::TableOutOfBounds)?;
 
-                let mut const_context = ConstEvalContext::new(instance);
+                let mut const_context = ConstEvalContext::new(instance.id());
                 let mut const_evaluator = ConstExprEvaluator::default();
 
                 vals.extend(xs.iter().map(|x| unsafe {
@@ -854,7 +915,7 @@ unsafe fn array_new_elem(
 #[cfg(feature = "gc")]
 unsafe fn array_init_elem(
     store: &mut dyn VMStore,
-    instance: &mut Instance,
+    instance: Pin<&mut Instance>,
     array_type_index: u32,
     array: u32,
     dst: u32,
@@ -863,9 +924,9 @@ unsafe fn array_init_elem(
     len: u32,
 ) -> Result<()> {
     use crate::{
+        ArrayRef, Func, OpaqueRootScope, Val,
         store::AutoAssertNoGc,
         vm::const_expr::{ConstEvalContext, ConstExprEvaluator},
-        ArrayRef, Func, OpaqueRootScope, Val,
     };
     use wasmtime_environ::{ModuleInternedTypeIndex, TableSegmentElements};
 
@@ -876,8 +937,8 @@ unsafe fn array_init_elem(
     let elem_index = ElemIndex::from_u32(elem_index);
 
     log::trace!(
-            "array.init_elem(array={array:#x}, dst={dst}, elem_index={elem_index:?}, src={src}, len={len})",
-        );
+        "array.init_elem(array={array:#x}, dst={dst}, elem_index={elem_index:?}, src={src}, len={len})",
+    );
 
     // Convert the raw GC ref into a `Rooted<ArrayRef>`.
     let array = VMGcRef::from_raw_u32(array).ok_or_else(|| Trap::NullReference)?;
@@ -911,7 +972,7 @@ unsafe fn array_init_elem(
             .iter()
             .map(|f| {
                 let raw_func_ref = instance.get_func_ref(*f);
-                let func = raw_func_ref.map(|p| Func::from_vm_func_ref(&mut store, p));
+                let func = raw_func_ref.map(|p| Func::from_vm_func_ref(&store, p));
                 Val::FuncRef(func)
             })
             .collect::<Vec<_>>(),
@@ -919,7 +980,7 @@ unsafe fn array_init_elem(
             let elem_ty = array._ty(&store)?.element_type();
             let elem_ty = elem_ty.unwrap_val_type();
 
-            let mut const_context = ConstEvalContext::new(instance);
+            let mut const_context = ConstEvalContext::new(instance.id());
             let mut const_evaluator = ConstExprEvaluator::default();
 
             xs.get(src..)
@@ -954,18 +1015,18 @@ unsafe fn array_init_elem(
 #[cfg(feature = "gc")]
 unsafe fn array_copy(
     store: &mut dyn VMStore,
-    _instance: &mut Instance,
+    _instance: Pin<&mut Instance>,
     dst_array: u32,
     dst: u32,
     src_array: u32,
     src: u32,
     len: u32,
 ) -> Result<()> {
-    use crate::{store::AutoAssertNoGc, ArrayRef, OpaqueRootScope};
+    use crate::{ArrayRef, OpaqueRootScope, store::AutoAssertNoGc};
 
     log::trace!(
-            "array.copy(dst_array={dst_array:#x}, dst_index={dst}, src_array={src_array:#x}, src_index={src}, len={len})",
-        );
+        "array.copy(dst_array={dst_array:#x}, dst_index={dst}, src_array={src_array:#x}, src_index={src}, len={len})",
+    );
 
     let mut store = OpaqueRootScope::new(store.store_opaque_mut());
     let mut store = AutoAssertNoGc::new(&mut store);
@@ -1015,7 +1076,7 @@ unsafe fn array_copy(
 #[cfg(feature = "gc")]
 unsafe fn is_subtype(
     store: &mut dyn VMStore,
-    _instance: &mut Instance,
+    _instance: Pin<&mut Instance>,
     actual_engine_type: u32,
     expected_engine_type: u32,
 ) -> u32 {
@@ -1024,11 +1085,7 @@ unsafe fn is_subtype(
     let actual = VMSharedTypeIndex::from_u32(actual_engine_type);
     let expected = VMSharedTypeIndex::from_u32(expected_engine_type);
 
-    let is_subtype: bool = store
-        .engine()
-        .signatures()
-        .is_subtype(actual, expected)
-        .into();
+    let is_subtype: bool = store.engine().signatures().is_subtype(actual, expected);
 
     log::trace!("is_subtype(actual={actual:?}, expected={expected:?}) -> {is_subtype}",);
     is_subtype as u32
@@ -1038,7 +1095,7 @@ unsafe fn is_subtype(
 #[cfg(feature = "threads")]
 fn memory_atomic_notify(
     _store: &mut dyn VMStore,
-    instance: &mut Instance,
+    instance: Pin<&mut Instance>,
     memory_index: u32,
     addr_index: u64,
     count: u32,
@@ -1053,7 +1110,7 @@ fn memory_atomic_notify(
 #[cfg(feature = "threads")]
 fn memory_atomic_wait32(
     _store: &mut dyn VMStore,
-    instance: &mut Instance,
+    instance: Pin<&mut Instance>,
     memory_index: u32,
     addr_index: u64,
     expected: u32,
@@ -1070,7 +1127,7 @@ fn memory_atomic_wait32(
 #[cfg(feature = "threads")]
 fn memory_atomic_wait64(
     _store: &mut dyn VMStore,
-    instance: &mut Instance,
+    instance: Pin<&mut Instance>,
     memory_index: u32,
     addr_index: u64,
     expected: u64,
@@ -1084,13 +1141,13 @@ fn memory_atomic_wait64(
 }
 
 // Hook for when an instance runs out of fuel.
-fn out_of_gas(store: &mut dyn VMStore, _instance: &mut Instance) -> Result<()> {
+fn out_of_gas(store: &mut dyn VMStore, _instance: Pin<&mut Instance>) -> Result<()> {
     store.out_of_gas()
 }
 
 // Hook for when an instance observes that the epoch has changed.
 #[cfg(target_has_atomic = "64")]
-fn new_epoch(store: &mut dyn VMStore, _instance: &mut Instance) -> Result<NextEpoch> {
+fn new_epoch(store: &mut dyn VMStore, _instance: Pin<&mut Instance>) -> Result<NextEpoch> {
     store.new_epoch().map(NextEpoch)
 }
 
@@ -1108,11 +1165,11 @@ unsafe impl HostResultHasUnwindSentinel for NextEpoch {
 #[cfg(feature = "wmemcheck")]
 unsafe fn check_malloc(
     _store: &mut dyn VMStore,
-    instance: &mut Instance,
+    instance: Pin<&mut Instance>,
     addr: u32,
     len: u32,
 ) -> Result<()> {
-    if let Some(wmemcheck_state) = &mut instance.wmemcheck_state {
+    if let Some(wmemcheck_state) = instance.wmemcheck_state_mut() {
         let result = wmemcheck_state.malloc(addr as usize, len as usize);
         wmemcheck_state.memcheck_on();
         match result {
@@ -1133,8 +1190,12 @@ unsafe fn check_malloc(
 
 // Hook for validating free using wmemcheck_state.
 #[cfg(feature = "wmemcheck")]
-unsafe fn check_free(_store: &mut dyn VMStore, instance: &mut Instance, addr: u32) -> Result<()> {
-    if let Some(wmemcheck_state) = &mut instance.wmemcheck_state {
+unsafe fn check_free(
+    _store: &mut dyn VMStore,
+    instance: Pin<&mut Instance>,
+    addr: u32,
+) -> Result<()> {
+    if let Some(wmemcheck_state) = instance.wmemcheck_state_mut() {
         let result = wmemcheck_state.free(addr as usize);
         wmemcheck_state.memcheck_on();
         match result {
@@ -1154,12 +1215,12 @@ unsafe fn check_free(_store: &mut dyn VMStore, instance: &mut Instance, addr: u3
 #[cfg(feature = "wmemcheck")]
 fn check_load(
     _store: &mut dyn VMStore,
-    instance: &mut Instance,
+    instance: Pin<&mut Instance>,
     num_bytes: u32,
     addr: u32,
     offset: u32,
 ) -> Result<()> {
-    if let Some(wmemcheck_state) = &mut instance.wmemcheck_state {
+    if let Some(wmemcheck_state) = instance.wmemcheck_state_mut() {
         let result = wmemcheck_state.read(addr as usize + offset as usize, num_bytes as usize);
         match result {
             Ok(()) => {}
@@ -1181,12 +1242,12 @@ fn check_load(
 #[cfg(feature = "wmemcheck")]
 fn check_store(
     _store: &mut dyn VMStore,
-    instance: &mut Instance,
+    instance: Pin<&mut Instance>,
     num_bytes: u32,
     addr: u32,
     offset: u32,
 ) -> Result<()> {
-    if let Some(wmemcheck_state) = &mut instance.wmemcheck_state {
+    if let Some(wmemcheck_state) = instance.wmemcheck_state_mut() {
         let result = wmemcheck_state.write(addr as usize + offset as usize, num_bytes as usize);
         match result {
             Ok(()) => {}
@@ -1206,23 +1267,23 @@ fn check_store(
 
 // Hook for turning wmemcheck load/store validation off when entering a malloc function.
 #[cfg(feature = "wmemcheck")]
-fn malloc_start(_store: &mut dyn VMStore, instance: &mut Instance) {
-    if let Some(wmemcheck_state) = &mut instance.wmemcheck_state {
+fn malloc_start(_store: &mut dyn VMStore, instance: Pin<&mut Instance>) {
+    if let Some(wmemcheck_state) = instance.wmemcheck_state_mut() {
         wmemcheck_state.memcheck_off();
     }
 }
 
 // Hook for turning wmemcheck load/store validation off when entering a free function.
 #[cfg(feature = "wmemcheck")]
-fn free_start(_store: &mut dyn VMStore, instance: &mut Instance) {
-    if let Some(wmemcheck_state) = &mut instance.wmemcheck_state {
+fn free_start(_store: &mut dyn VMStore, instance: Pin<&mut Instance>) {
+    if let Some(wmemcheck_state) = instance.wmemcheck_state_mut() {
         wmemcheck_state.memcheck_off();
     }
 }
 
 // Hook for tracking wasm stack updates using wmemcheck_state.
 #[cfg(feature = "wmemcheck")]
-fn update_stack_pointer(_store: &mut dyn VMStore, _instance: &mut Instance, _value: u32) {
+fn update_stack_pointer(_store: &mut dyn VMStore, _instance: Pin<&mut Instance>, _value: u32) {
     // TODO: stack-tracing has yet to be finalized. All memory below
     // the address of the top of the stack is marked as valid for
     // loads and stores.
@@ -1233,50 +1294,55 @@ fn update_stack_pointer(_store: &mut dyn VMStore, _instance: &mut Instance, _val
 
 // Hook updating wmemcheck_state memory state vector every time memory.grow is called.
 #[cfg(feature = "wmemcheck")]
-fn update_mem_size(_store: &mut dyn VMStore, instance: &mut Instance, num_pages: u32) {
-    if let Some(wmemcheck_state) = &mut instance.wmemcheck_state {
+fn update_mem_size(_store: &mut dyn VMStore, instance: Pin<&mut Instance>, num_pages: u32) {
+    if let Some(wmemcheck_state) = instance.wmemcheck_state_mut() {
         const KIB: usize = 1024;
         let num_bytes = num_pages as usize * 64 * KIB;
         wmemcheck_state.update_mem_size(num_bytes);
     }
 }
 
-fn floor_f32(_store: &mut dyn VMStore, _instance: &mut Instance, val: f32) -> f32 {
+fn floor_f32(_store: &mut dyn VMStore, _instance: Pin<&mut Instance>, val: f32) -> f32 {
     wasmtime_math::WasmFloat::wasm_floor(val)
 }
 
-fn floor_f64(_store: &mut dyn VMStore, _instance: &mut Instance, val: f64) -> f64 {
+fn floor_f64(_store: &mut dyn VMStore, _instance: Pin<&mut Instance>, val: f64) -> f64 {
     wasmtime_math::WasmFloat::wasm_floor(val)
 }
 
-fn ceil_f32(_store: &mut dyn VMStore, _instance: &mut Instance, val: f32) -> f32 {
+fn ceil_f32(_store: &mut dyn VMStore, _instance: Pin<&mut Instance>, val: f32) -> f32 {
     wasmtime_math::WasmFloat::wasm_ceil(val)
 }
 
-fn ceil_f64(_store: &mut dyn VMStore, _instance: &mut Instance, val: f64) -> f64 {
+fn ceil_f64(_store: &mut dyn VMStore, _instance: Pin<&mut Instance>, val: f64) -> f64 {
     wasmtime_math::WasmFloat::wasm_ceil(val)
 }
 
-fn trunc_f32(_store: &mut dyn VMStore, _instance: &mut Instance, val: f32) -> f32 {
+fn trunc_f32(_store: &mut dyn VMStore, _instance: Pin<&mut Instance>, val: f32) -> f32 {
     wasmtime_math::WasmFloat::wasm_trunc(val)
 }
 
-fn trunc_f64(_store: &mut dyn VMStore, _instance: &mut Instance, val: f64) -> f64 {
+fn trunc_f64(_store: &mut dyn VMStore, _instance: Pin<&mut Instance>, val: f64) -> f64 {
     wasmtime_math::WasmFloat::wasm_trunc(val)
 }
 
-fn nearest_f32(_store: &mut dyn VMStore, _instance: &mut Instance, val: f32) -> f32 {
+fn nearest_f32(_store: &mut dyn VMStore, _instance: Pin<&mut Instance>, val: f32) -> f32 {
     wasmtime_math::WasmFloat::wasm_nearest(val)
 }
 
-fn nearest_f64(_store: &mut dyn VMStore, _instance: &mut Instance, val: f64) -> f64 {
+fn nearest_f64(_store: &mut dyn VMStore, _instance: Pin<&mut Instance>, val: f64) -> f64 {
     wasmtime_math::WasmFloat::wasm_nearest(val)
 }
 
 // This intrinsic is only used on x86_64 platforms as an implementation of
 // the `i8x16.swizzle` instruction when `pshufb` in SSSE3 is not available.
 #[cfg(all(target_arch = "x86_64", target_feature = "sse"))]
-fn i8x16_swizzle(_store: &mut dyn VMStore, _instance: &mut Instance, a: i8x16, b: i8x16) -> i8x16 {
+fn i8x16_swizzle(
+    _store: &mut dyn VMStore,
+    _instance: Pin<&mut Instance>,
+    a: i8x16,
+    b: i8x16,
+) -> i8x16 {
     union U {
         reg: i8x16,
         mem: [u8; 16],
@@ -1290,11 +1356,7 @@ fn i8x16_swizzle(_store: &mut dyn VMStore, _instance: &mut Instance, a: i8x16, b
         // index, rather than the x86 pshufb semantics, since Wasmtime uses
         // this to implement `i8x16.swizzle`.
         let select = |arr: &[u8; 16], byte: u8| {
-            if byte >= 16 {
-                0x00
-            } else {
-                arr[byte as usize]
-            }
+            if byte >= 16 { 0x00 } else { arr[byte as usize] }
         };
 
         U {
@@ -1324,7 +1386,7 @@ fn i8x16_swizzle(_store: &mut dyn VMStore, _instance: &mut Instance, a: i8x16, b
 #[cfg(not(all(target_arch = "x86_64", target_feature = "sse")))]
 fn i8x16_swizzle(
     _store: &mut dyn VMStore,
-    _instance: &mut Instance,
+    _instance: Pin<&mut Instance>,
     _a: i8x16,
     _b: i8x16,
 ) -> i8x16 {
@@ -1336,7 +1398,7 @@ fn i8x16_swizzle(
 #[cfg(all(target_arch = "x86_64", target_feature = "sse"))]
 fn i8x16_shuffle(
     _store: &mut dyn VMStore,
-    _instance: &mut Instance,
+    _instance: Pin<&mut Instance>,
     a: i8x16,
     b: i8x16,
     c: i8x16,
@@ -1390,7 +1452,7 @@ fn i8x16_shuffle(
 #[cfg(not(all(target_arch = "x86_64", target_feature = "sse")))]
 fn i8x16_shuffle(
     _store: &mut dyn VMStore,
-    _instance: &mut Instance,
+    _instance: Pin<&mut Instance>,
     _a: i8x16,
     _b: i8x16,
     _c: i8x16,
@@ -1400,7 +1462,7 @@ fn i8x16_shuffle(
 
 fn fma_f32x4(
     _store: &mut dyn VMStore,
-    _instance: &mut Instance,
+    _instance: Pin<&mut Instance>,
     x: f32x4,
     y: f32x4,
     z: f32x4,
@@ -1429,7 +1491,7 @@ fn fma_f32x4(
 
 fn fma_f64x2(
     _store: &mut dyn VMStore,
-    _instance: &mut Instance,
+    _instance: Pin<&mut Instance>,
     x: f64x2,
     y: f64x2,
     z: f64x2,
@@ -1461,7 +1523,7 @@ fn fma_f64x2(
 /// `Result` values to record such trap information.
 fn trap(
     _store: &mut dyn VMStore,
-    _instance: &mut Instance,
+    _instance: Pin<&mut Instance>,
     code: u8,
 ) -> Result<Infallible, TrapReason> {
     Err(TrapReason::Wasm(
@@ -1469,7 +1531,7 @@ fn trap(
     ))
 }
 
-fn raise(_store: &mut dyn VMStore, _instance: &mut Instance) {
+fn raise(_store: &mut dyn VMStore, _instance: Pin<&mut Instance>) {
     // SAFETY: this is only called from compiled wasm so we know that wasm has
     // already been entered. It's a dynamic safety precondition that the trap
     // information has already been arranged to be present.
@@ -1482,4 +1544,19 @@ fn raise(_store: &mut dyn VMStore, _instance: &mut Instance) {
     // just insert a stub to catch bugs if it's accidentally called.
     #[cfg(not(has_host_compiler_backend))]
     unreachable!()
+}
+
+// Builtins for continuations. These are thin wrappers around the
+// respective definitions in stack_switching.rs.
+#[cfg(feature = "stack-switching")]
+fn cont_new(
+    store: &mut dyn VMStore,
+    instance: Pin<&mut Instance>,
+    func: *mut u8,
+    param_count: u32,
+    result_count: u32,
+) -> Result<Option<AllocationSize>, TrapReason> {
+    let ans =
+        crate::vm::stack_switching::cont_new(store, instance, func, param_count, result_count)?;
+    Ok(Some(AllocationSize(ans.cast::<u8>() as usize)))
 }

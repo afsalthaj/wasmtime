@@ -1,13 +1,13 @@
+use crate::ScopeVec;
 use crate::component::*;
 use crate::prelude::*;
-use crate::ScopeVec;
 use crate::{
     EngineOrModuleTypeIndex, EntityIndex, ModuleEnvironment, ModuleInternedTypeIndex,
     ModuleTranslation, ModuleTypesBuilder, PrimaryMap, TagIndex, Tunables, TypeConvert,
     WasmHeapType, WasmResult, WasmValType,
 };
 use anyhow::anyhow;
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use indexmap::IndexMap;
 use std::collections::HashMap;
 use std::mem;
@@ -196,6 +196,9 @@ enum LocalInitializer<'data> {
         result: Option<ComponentValType>,
         options: LocalCanonicalOptions,
     },
+    TaskCancel {
+        func: ModuleInternedTypeIndex,
+    },
     WaitableSetNew {
         func: ModuleInternedTypeIndex,
     },
@@ -222,6 +225,10 @@ enum LocalInitializer<'data> {
     SubtaskDrop {
         func: ModuleInternedTypeIndex,
     },
+    SubtaskCancel {
+        func: ModuleInternedTypeIndex,
+        async_: bool,
+    },
     StreamNew {
         ty: ComponentDefinedTypeId,
         func: ModuleInternedTypeIndex,
@@ -246,11 +253,11 @@ enum LocalInitializer<'data> {
         func: ModuleInternedTypeIndex,
         async_: bool,
     },
-    StreamCloseReadable {
+    StreamDropReadable {
         ty: ComponentDefinedTypeId,
         func: ModuleInternedTypeIndex,
     },
-    StreamCloseWritable {
+    StreamDropWritable {
         ty: ComponentDefinedTypeId,
         func: ModuleInternedTypeIndex,
     },
@@ -278,11 +285,11 @@ enum LocalInitializer<'data> {
         func: ModuleInternedTypeIndex,
         async_: bool,
     },
-    FutureCloseReadable {
+    FutureDropReadable {
         ty: ComponentDefinedTypeId,
         func: ModuleInternedTypeIndex,
     },
-    FutureCloseWritable {
+    FutureDropWritable {
         ty: ComponentDefinedTypeId,
         func: ModuleInternedTypeIndex,
     },
@@ -296,6 +303,14 @@ enum LocalInitializer<'data> {
     },
     ErrorContextDrop {
         func: ModuleInternedTypeIndex,
+    },
+    ContextGet {
+        func: ModuleInternedTypeIndex,
+        i: u32,
+    },
+    ContextSet {
+        func: ModuleInternedTypeIndex,
+        i: u32,
     },
 
     // core wasm modules
@@ -639,6 +654,11 @@ impl<'a, 'data> Translator<'a, 'data> {
                             core_func_index += 1;
                             LocalInitializer::ResourceRep(resource, ty)
                         }
+                        wasmparser::CanonicalFunction::ThreadSpawnRef { .. }
+                        | wasmparser::CanonicalFunction::ThreadSpawnIndirect { .. }
+                        | wasmparser::CanonicalFunction::ThreadAvailableParallelism => {
+                            bail!("unsupported intrinsic")
+                        }
                         wasmparser::CanonicalFunction::BackpressureSet => {
                             let core_type = self.core_func_signature(core_func_index)?;
                             core_func_index += 1;
@@ -661,6 +681,11 @@ impl<'a, 'data> Translator<'a, 'data> {
                                 result,
                                 options,
                             }
+                        }
+                        wasmparser::CanonicalFunction::TaskCancel => {
+                            let func = self.core_func_signature(core_func_index)?;
+                            core_func_index += 1;
+                            LocalInitializer::TaskCancel { func }
                         }
                         wasmparser::CanonicalFunction::WaitableSetNew => {
                             let func = self.core_func_signature(core_func_index)?;
@@ -705,6 +730,11 @@ impl<'a, 'data> Translator<'a, 'data> {
                             core_func_index += 1;
                             LocalInitializer::SubtaskDrop { func }
                         }
+                        wasmparser::CanonicalFunction::SubtaskCancel { async_ } => {
+                            let func = self.core_func_signature(core_func_index)?;
+                            core_func_index += 1;
+                            LocalInitializer::SubtaskCancel { func, async_ }
+                        }
                         wasmparser::CanonicalFunction::StreamNew { ty } => {
                             let ty = types.component_defined_type_at(ty);
                             let func = self.core_func_signature(core_func_index)?;
@@ -737,17 +767,17 @@ impl<'a, 'data> Translator<'a, 'data> {
                             core_func_index += 1;
                             LocalInitializer::StreamCancelWrite { ty, func, async_ }
                         }
-                        wasmparser::CanonicalFunction::StreamCloseReadable { ty } => {
+                        wasmparser::CanonicalFunction::StreamDropReadable { ty } => {
                             let ty = types.component_defined_type_at(ty);
                             let func = self.core_func_signature(core_func_index)?;
                             core_func_index += 1;
-                            LocalInitializer::StreamCloseReadable { ty, func }
+                            LocalInitializer::StreamDropReadable { ty, func }
                         }
-                        wasmparser::CanonicalFunction::StreamCloseWritable { ty } => {
+                        wasmparser::CanonicalFunction::StreamDropWritable { ty } => {
                             let ty = types.component_defined_type_at(ty);
                             let func = self.core_func_signature(core_func_index)?;
                             core_func_index += 1;
-                            LocalInitializer::StreamCloseWritable { ty, func }
+                            LocalInitializer::StreamDropWritable { ty, func }
                         }
                         wasmparser::CanonicalFunction::FutureNew { ty } => {
                             let ty = types.component_defined_type_at(ty);
@@ -781,17 +811,17 @@ impl<'a, 'data> Translator<'a, 'data> {
                             core_func_index += 1;
                             LocalInitializer::FutureCancelWrite { ty, func, async_ }
                         }
-                        wasmparser::CanonicalFunction::FutureCloseReadable { ty } => {
+                        wasmparser::CanonicalFunction::FutureDropReadable { ty } => {
                             let ty = types.component_defined_type_at(ty);
                             let func = self.core_func_signature(core_func_index)?;
                             core_func_index += 1;
-                            LocalInitializer::FutureCloseReadable { ty, func }
+                            LocalInitializer::FutureDropReadable { ty, func }
                         }
-                        wasmparser::CanonicalFunction::FutureCloseWritable { ty } => {
+                        wasmparser::CanonicalFunction::FutureDropWritable { ty } => {
                             let ty = types.component_defined_type_at(ty);
                             let func = self.core_func_signature(core_func_index)?;
                             core_func_index += 1;
-                            LocalInitializer::FutureCloseWritable { ty, func }
+                            LocalInitializer::FutureDropWritable { ty, func }
                         }
                         wasmparser::CanonicalFunction::ErrorContextNew { options } => {
                             let options = self.canonical_options(&options);
@@ -810,14 +840,15 @@ impl<'a, 'data> Translator<'a, 'data> {
                             core_func_index += 1;
                             LocalInitializer::ErrorContextDrop { func }
                         }
-                        wasmparser::CanonicalFunction::ContextGet(..)
-                        | wasmparser::CanonicalFunction::ContextSet(..)
-                        | wasmparser::CanonicalFunction::TaskCancel
-                        | wasmparser::CanonicalFunction::SubtaskCancel { .. }
-                        | wasmparser::CanonicalFunction::ThreadSpawnRef { .. }
-                        | wasmparser::CanonicalFunction::ThreadSpawnIndirect { .. }
-                        | wasmparser::CanonicalFunction::ThreadAvailableParallelism => {
-                            bail!("unsupported intrinsic")
+                        wasmparser::CanonicalFunction::ContextGet(i) => {
+                            let func = self.core_func_signature(core_func_index)?;
+                            core_func_index += 1;
+                            LocalInitializer::ContextGet { i, func }
+                        }
+                        wasmparser::CanonicalFunction::ContextSet(i) => {
+                            let func = self.core_func_signature(core_func_index)?;
+                            core_func_index += 1;
+                            LocalInitializer::ContextSet { i, func }
                         }
                     };
                     self.result.initializers.push(init);
@@ -1219,7 +1250,9 @@ impl<'a, 'data> Translator<'a, 'data> {
                     let idx = FuncIndex::from_u32(*idx);
                     ret.callback = Some(idx);
                 }
-                wasmparser::CanonicalOption::CoreType(_) => todo!(),
+                wasmparser::CanonicalOption::CoreType(_) | wasmparser::CanonicalOption::Gc => {
+                    todo!("component model and GC support")
+                }
             }
         }
         return ret;

@@ -33,7 +33,9 @@ pub(crate) struct f32x4(crate::uninhabited::Uninhabited);
 #[derive(Copy, Clone)]
 pub(crate) struct f64x2(crate::uninhabited::Uninhabited);
 
+use crate::StoreContextMut;
 use crate::prelude::*;
+use crate::store::StoreInner;
 use crate::store::StoreOpaque;
 use alloc::sync::Arc;
 use core::fmt;
@@ -48,8 +50,6 @@ use wasmtime_environ::{
 #[cfg(feature = "gc")]
 use wasmtime_environ::ModuleInternedTypeIndex;
 
-#[cfg(has_host_compiler_backend)]
-mod arch;
 #[cfg(feature = "component-model")]
 pub mod component;
 mod const_expr;
@@ -61,11 +61,11 @@ mod memory;
 mod mmap_vec;
 mod provenance;
 mod send_sync_ptr;
+mod stack_switching;
 mod store_box;
 mod sys;
 mod table;
 mod traphandlers;
-mod unwind;
 mod vmcontext;
 
 #[cfg(feature = "threads")]
@@ -89,15 +89,13 @@ pub(crate) use interpreter_disabled as interpreter;
 #[cfg(feature = "debug-builtins")]
 pub use wasmtime_jit_debug::gdb_jit_int::GdbJitImageRegistration;
 
-#[cfg(has_host_compiler_backend)]
-pub use crate::runtime::vm::arch::get_stack_pointer;
 pub use crate::runtime::vm::export::*;
 pub use crate::runtime::vm::gc::*;
 pub use crate::runtime::vm::imports::Imports;
 pub use crate::runtime::vm::instance::{
     GcHeapAllocationIndex, Instance, InstanceAllocationRequest, InstanceAllocator,
     InstanceAllocatorImpl, InstanceAndStore, InstanceHandle, MemoryAllocationIndex,
-    OnDemandInstanceAllocator, StorePtr, TableAllocationIndex,
+    OnDemandInstanceAllocator, StorePtr, TableAllocationIndex, initialize_instance,
 };
 #[cfg(feature = "pooling-allocator")]
 pub use crate::runtime::vm::instance::{
@@ -110,6 +108,7 @@ pub use crate::runtime::vm::memory::{
 };
 pub use crate::runtime::vm::mmap_vec::MmapVec;
 pub use crate::runtime::vm::provenance::*;
+pub use crate::runtime::vm::stack_switching::*;
 pub use crate::runtime::vm::store_box::*;
 #[cfg(feature = "std")]
 pub use crate::runtime::vm::sys::mmap::open_file_for_mmap;
@@ -117,15 +116,20 @@ pub use crate::runtime::vm::sys::mmap::open_file_for_mmap;
 pub use crate::runtime::vm::sys::unwind::UnwindRegistration;
 pub use crate::runtime::vm::table::{Table, TableElement};
 pub use crate::runtime::vm::traphandlers::*;
-pub use crate::runtime::vm::unwind::*;
 #[cfg(feature = "component-model")]
 pub use crate::runtime::vm::vmcontext::VMTableDefinition;
 pub use crate::runtime::vm::vmcontext::{
     VMArrayCallFunction, VMArrayCallHostFuncContext, VMContext, VMFuncRef, VMFunctionBody,
-    VMFunctionImport, VMGlobalDefinition, VMGlobalImport, VMMemoryDefinition, VMMemoryImport,
-    VMOpaqueContext, VMStoreContext, VMTable, VMTagImport, VMWasmCallFunction, ValRaw,
+    VMFunctionImport, VMGlobalDefinition, VMGlobalImport, VMGlobalKind, VMMemoryDefinition,
+    VMMemoryImport, VMOpaqueContext, VMStoreContext, VMTableImport, VMTagImport,
+    VMWasmCallFunction, ValRaw,
 };
+
 pub use send_sync_ptr::SendSyncPtr;
+pub use wasmtime_unwinder::Unwind;
+
+#[cfg(has_host_compiler_backend)]
+pub use wasmtime_unwinder::{UnwindHost, get_stack_pointer};
 
 mod module_id;
 pub use module_id::CompiledModuleId;
@@ -164,13 +168,21 @@ cfg_if::cfg_if! {
 ///
 /// This trait is used to store a raw pointer trait object within each
 /// `VMContext`. This raw pointer trait object points back to the
-/// `wasmtime::Store` internally but is type-erased so this `wasmtime-runtime`
-/// crate doesn't need the entire `wasmtime` crate to build.
+/// `wasmtime::Store` internally but is type-erased to avoid needing to
+/// monomorphize the entire runtime on the `T` in `Store<T>`
 ///
-/// Note that this is an extra-unsafe trait because no heed is paid to the
-/// lifetime of this store or the Send/Sync-ness of this store. All of that must
-/// be respected by embedders (e.g. the `wasmtime::Store` structure). The theory
-/// is that `wasmtime::Store` handles all this correctly.
+/// # Safety
+///
+/// This trait should be implemented by nothing other than `StoreInner<T>` in
+/// this crate. It's not sound to implement it for anything else due to
+/// `unchecked_context_mut` below.
+///
+/// It's also worth nothing that there are various locations where a `*mut dyn
+/// VMStore` is asserted to be both `Send` and `Sync` which disregards the `T`
+/// that's actually stored in the store itself. It's assume that the high-level
+/// APIs using `Store<T>` are correctly inferring send/sync on the returned
+/// values (e.g. futures) and that internally in the runtime we aren't doing
+/// anything "weird" with threads for example.
 pub unsafe trait VMStore {
     /// Get a shared borrow of this store's `StoreOpaque`.
     fn store_opaque(&self) -> &StoreOpaque;
@@ -260,6 +272,19 @@ impl Deref for dyn VMStore + '_ {
 impl DerefMut for dyn VMStore + '_ {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.store_opaque_mut()
+    }
+}
+
+impl dyn VMStore + '_ {
+    /// Asserts that this `VMStore` was originally paired with `StoreInner<T>`
+    /// and then casts to the `StoreContextMut` type.
+    ///
+    /// # Unsafety
+    ///
+    /// This method is not safe as there's no static guarantee that `T` is
+    /// correct for this store.
+    pub(crate) unsafe fn unchecked_context_mut<T>(&mut self) -> StoreContextMut<'_, T> {
+        StoreContextMut(&mut *(self as *mut dyn VMStore as *mut StoreInner<T>))
     }
 }
 
@@ -449,6 +474,8 @@ impl ModuleRuntimeInfo {
 /// Returns the host OS page size, in bytes.
 #[cfg(has_virtual_memory)]
 pub fn host_page_size() -> usize {
+    // NB: this function is duplicated in `crates/fiber/src/unix.rs` so if this
+    // changes that should probably get updated as well.
     static PAGE_SIZE: AtomicUsize = AtomicUsize::new(0);
 
     return match PAGE_SIZE.load(Ordering::Relaxed) {

@@ -5,13 +5,13 @@ use crate::{Engine, ExternType, FuncType};
 use alloc::sync::Arc;
 use core::fmt;
 use core::ops::Deref;
+use wasmtime_environ::PrimaryMap;
 use wasmtime_environ::component::{
     ComponentTypes, Export, InterfaceType, ResourceIndex, TypeComponentIndex,
     TypeComponentInstanceIndex, TypeDef, TypeEnumIndex, TypeFlagsIndex, TypeFuncIndex,
     TypeListIndex, TypeModuleIndex, TypeOptionIndex, TypeRecordIndex, TypeResourceTableIndex,
     TypeResultIndex, TypeTupleIndex, TypeVariantIndex,
 };
-use wasmtime_environ::PrimaryMap;
 
 pub use crate::component::resources::ResourceType;
 
@@ -351,12 +351,12 @@ impl Variant {
     }
 
     /// Retrieve the cases of this `variant` in declaration order.
-    pub fn cases(&self) -> impl ExactSizeIterator<Item = Case> {
+    pub fn cases(&self) -> impl ExactSizeIterator<Item = Case<'_>> {
         self.0.types[self.0.index]
             .cases
             .iter()
             .map(|(name, ty)| Case {
-                name: name,
+                name,
                 ty: ty.as_ref().map(|ty| Type::from(ty, &self.0.instance())),
             })
     }

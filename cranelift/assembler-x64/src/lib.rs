@@ -13,8 +13,10 @@
 //! impl Registers for Regs {
 //!     type ReadGpr = u8;
 //!     type ReadWriteGpr = u8;
+//!     type WriteGpr = u8;
 //!     type ReadXmm = u8;
 //!     type ReadWriteXmm = u8;
+//!     type WriteXmm = u8;
 //! }
 //!
 //! // Then, build one of the `AND` instructions; this one operates on an
@@ -45,12 +47,14 @@
 )]
 
 mod api;
+mod custom;
 mod fixed;
 pub mod gpr;
 mod imm;
 pub mod inst;
 mod mem;
 mod rex;
+mod vex;
 pub mod xmm;
 
 #[cfg(any(test, feature = "fuzz"))]
@@ -80,7 +84,7 @@ pub use api::{
 };
 pub use fixed::Fixed;
 pub use gpr::{Gpr, NonRspGpr, Size};
-pub use imm::{Extension, Imm16, Imm32, Imm8, Simm16, Simm32, Simm8};
+pub use imm::{Extension, Imm8, Imm16, Imm32, Imm64, Simm8, Simm16, Simm32};
 pub use mem::{
     Amode, AmodeOffset, AmodeOffsetPlusKnownOffset, DeferredTarget, GprMem, Scale, XmmMem,
 };

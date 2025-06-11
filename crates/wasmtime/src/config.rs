@@ -147,7 +147,7 @@ pub struct Config {
     pub(crate) wasm_backtrace: bool,
     pub(crate) wasm_backtrace_details_env_used: bool,
     pub(crate) native_unwind_info: Option<bool>,
-    #[cfg(feature = "async")]
+    #[cfg(any(feature = "async", feature = "stack-switching"))]
     pub(crate) async_stack_size: usize,
     #[cfg(feature = "async")]
     pub(crate) async_stack_zeroing: bool,
@@ -252,7 +252,7 @@ impl Config {
             native_unwind_info: None,
             enabled_features: WasmFeatures::empty(),
             disabled_features: WasmFeatures::empty(),
-            #[cfg(feature = "async")]
+            #[cfg(any(feature = "async", feature = "stack-switching"))]
             async_stack_size: 2 << 20,
             #[cfg(feature = "async")]
             async_stack_zeroing: false,
@@ -736,7 +736,7 @@ impl Config {
     ///
     /// The `Engine::new` method will fail if the value for this option is
     /// smaller than the [`Config::max_wasm_stack`] option.
-    #[cfg(feature = "async")]
+    #[cfg(any(feature = "async", feature = "stack-switching"))]
     pub fn async_stack_size(&mut self, size: usize) -> &mut Self {
         self.async_stack_size = size;
         self
@@ -1156,6 +1156,33 @@ impl Config {
     #[cfg(feature = "component-model-async")]
     pub fn wasm_component_model_async_stackful(&mut self, enable: bool) -> &mut Self {
         self.wasm_feature(WasmFeatures::CM_ASYNC_STACKFUL, enable);
+        self
+    }
+
+    /// This corresponds to the 📝 emoji in the component model specification.
+    ///
+    /// Please note that Wasmtime's support for this feature is _very_
+    /// incomplete.
+    ///
+    /// [proposal]: https://github.com/WebAssembly/component-model/blob/main/design/mvp/Async.md
+    #[cfg(feature = "component-model")]
+    pub fn wasm_component_model_error_context(&mut self, enable: bool) -> &mut Self {
+        self.wasm_feature(WasmFeatures::CM_ERROR_CONTEXT, enable);
+        self
+    }
+
+    /// Configures whether the [GC extension to the component-model
+    /// proposal][proposal] is enabled or not.
+    ///
+    /// This corresponds to the 🛸 emoji in the component model specification.
+    ///
+    /// Please note that Wasmtime's support for this feature is _very_
+    /// incomplete.
+    ///
+    /// [proposal]: https://github.com/WebAssembly/component-model/issues/525
+    #[cfg(feature = "component-model")]
+    pub fn wasm_component_model_gc(&mut self, enable: bool) -> &mut Self {
+        self.wasm_feature(WasmFeatures::CM_GC, enable);
         self
     }
 
@@ -2028,10 +2055,31 @@ impl Config {
                 // Pulley at this time fundamentally doesn't support the
                 // `threads` proposal, notably shared memory, because Rust can't
                 // safely implement loads/stores in the face of shared memory.
+                // Stack switching is not implemented, either.
                 if self.compiler_target().is_pulley() {
                     unsupported |= WasmFeatures::THREADS;
+                    unsupported |= WasmFeatures::STACK_SWITCHING;
                 }
 
+                use target_lexicon::*;
+                match self.compiler_target() {
+                    Triple {
+                        architecture: Architecture::X86_64 | Architecture::X86_64h,
+                        operating_system:
+                            OperatingSystem::Linux
+                            | OperatingSystem::MacOSX(_)
+                            | OperatingSystem::Darwin(_),
+                        ..
+                    } => {
+                        // Stack switching supported on (non-Pulley) Cranelift.
+                    }
+
+                    _ => {
+                        // On platforms other than x64 Unix-like, we don't
+                        // support stack switching.
+                        unsupported |= WasmFeatures::STACK_SWITCHING;
+                    }
+                }
                 unsupported
             }
             Some(Strategy::Winch) => {
@@ -2041,17 +2089,13 @@ impl Config {
                     | WasmFeatures::TAIL_CALL
                     | WasmFeatures::GC_TYPES
                     | WasmFeatures::EXCEPTIONS
-                    | WasmFeatures::LEGACY_EXCEPTIONS;
+                    | WasmFeatures::LEGACY_EXCEPTIONS
+                    | WasmFeatures::STACK_SWITCHING;
                 match self.compiler_target().architecture {
                     target_lexicon::Architecture::Aarch64(_) => {
-                        // no support for simd on aarch64
                         unsupported |= WasmFeatures::SIMD;
-
-                        // things like multi-table are technically supported on
-                        // winch on aarch64 but this helps gate most spec tests
-                        // by default which otherwise currently cause panics.
-                        unsupported |= WasmFeatures::REFERENCE_TYPES;
-                        unsupported |= WasmFeatures::THREADS
+                        unsupported |= WasmFeatures::THREADS;
+                        unsupported |= WasmFeatures::WIDE_ARITHMETIC;
                     }
 
                     // Winch doesn't support other non-x64 architectures at this
@@ -2157,7 +2201,7 @@ impl Config {
             panic!("should have returned an error by now")
         }
 
-        #[cfg(feature = "async")]
+        #[cfg(any(feature = "async", feature = "stack-switching"))]
         if self.async_support && self.max_wasm_stack > self.async_stack_size {
             bail!("max_wasm_stack size cannot exceed the async_stack_size");
         }
@@ -2373,7 +2417,9 @@ impl Config {
                 .compiler_config
                 .ensure_setting_unset_or_given("unwind_info", &unwind_requested.to_string())
             {
-                bail!("incompatible settings requested for Cranelift and Wasmtime `unwind-info` settings");
+                bail!(
+                    "incompatible settings requested for Cranelift and Wasmtime `unwind-info` settings"
+                );
             }
         }
 
@@ -2394,14 +2440,13 @@ impl Config {
             .insert("preserve_frame_pointers".into(), "true".into());
 
         if !tunables.signals_based_traps {
-            let mut ok = self.compiler_config.ensure_setting_unset_or_given(
-                "enable_table_access_spectre_mitigation".into(),
-                "false".into(),
-            );
+            let mut ok = self
+                .compiler_config
+                .ensure_setting_unset_or_given("enable_table_access_spectre_mitigation", "false");
             ok = ok
                 && self.compiler_config.ensure_setting_unset_or_given(
-                    "enable_heap_access_spectre_mitigation".into(),
-                    "false".into(),
+                    "enable_heap_access_spectre_mitigation",
+                    "false",
                 );
 
             // Right now spectre-mitigated bounds checks will load from zero so
@@ -2422,12 +2467,35 @@ impl Config {
                 .compiler_config
                 .ensure_setting_unset_or_given("enable_safepoints", "true")
             {
-                bail!("compiler option 'enable_safepoints' must be enabled when 'reference types' is enabled");
+                bail!(
+                    "compiler option 'enable_safepoints' must be enabled when 'reference types' is enabled"
+                );
             }
         }
 
         if features.contains(WasmFeatures::RELAXED_SIMD) && !features.contains(WasmFeatures::SIMD) {
             bail!("cannot disable the simd proposal but enable the relaxed simd proposal");
+        }
+
+        if features.contains(WasmFeatures::STACK_SWITCHING) {
+            use target_lexicon::OperatingSystem;
+            let model = match target.operating_system {
+                OperatingSystem::Windows => "update_windows_tib",
+                OperatingSystem::Linux
+                | OperatingSystem::MacOSX(_)
+                | OperatingSystem::Darwin(_) => "basic",
+                _ => bail!("stack-switching feature not supported on this platform "),
+            };
+
+            if !self
+                .compiler_config
+                .ensure_setting_unset_or_given("stack_switch_model", model)
+            {
+                bail!(
+                    "compiler option 'stack_switch_model' must be set to '{}' on this platform",
+                    model
+                );
+            }
         }
 
         // Apply compiler settings and flags

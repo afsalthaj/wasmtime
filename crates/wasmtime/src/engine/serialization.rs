@@ -28,7 +28,7 @@ use core::str::FromStr;
 use object::endian::Endianness;
 #[cfg(any(feature = "cranelift", feature = "winch"))]
 use object::write::{Object, StandardSegment};
-use object::{read::elf::ElfFile64, FileFlags, Object as _, ObjectSection};
+use object::{FileFlags, Object as _, ObjectSection, read::elf::ElfFile64};
 use serde_derive::{Deserialize, Serialize};
 use wasmtime_environ::obj;
 use wasmtime_environ::{FlagValue, ObjectKind, Tunables};
@@ -470,9 +470,9 @@ mod test {
         Ok(())
     }
 
+    // Note that this test runs on a platform that is known to use Cranelift
     #[test]
-    #[cfg(target_arch = "x86_64")] // test on a platform that is known to use
-                                   // Cranelift
+    #[cfg(all(target_arch = "x86_64", not(miri)))]
     fn test_os_mismatch() -> Result<()> {
         let engine = Engine::default();
         let mut metadata = Metadata::new(&engine);
@@ -553,7 +553,10 @@ Caused by:
 
         match metadata.check_compatible(&engine) {
             Ok(_) => unreachable!(),
-            Err(e) => assert_eq!(e.to_string(), "Module was compiled with a memory guard size of '0' but '33554432' is expected for the host"),
+            Err(e) => assert_eq!(
+                e.to_string(),
+                "Module was compiled with a memory guard size of '0' but '33554432' is expected for the host"
+            ),
         }
 
         Ok(())
@@ -594,9 +597,9 @@ Caused by:
         Ok(())
     }
 
+    /// This test is only run a platform that is known to implement threads
     #[test]
-    #[cfg(target_arch = "x86_64")] // test on a platform that is known to
-                                   // implement threads
+    #[cfg(all(target_arch = "x86_64", not(miri)))]
     fn test_feature_mismatch() -> Result<()> {
         let mut config = Config::new();
         config.wasm_threads(true);

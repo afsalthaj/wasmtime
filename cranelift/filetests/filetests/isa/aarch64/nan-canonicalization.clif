@@ -9,22 +9,22 @@ block0(v0: f32x4, v1: f32x4):
 }
 
 ; VCode:
-;   pushq   %rbp
+;   pushq %rbp
 ;   movq    %rsp, %rbp
 ; block0:
 ;   addps %xmm1, %xmm0
 ;   movl    $2143289344, %r10d
-;   movd    %r10d, %xmm7
+;   movd %r10d, %xmm7
 ;   shufps  $0, %xmm7, const(0), %xmm7
-;   movdqa  %xmm0, %xmm1
+;   movdqa %xmm0, %xmm1
 ;   cmpps   $3, %xmm1, %xmm0, %xmm1
-;   movdqa  %xmm0, %xmm2
-;   movdqa  %xmm1, %xmm0
-;   movdqa  %xmm2, %xmm1
-;   pblendvb %xmm1, %xmm7, %xmm1
-;   movdqa  %xmm1, %xmm0
+;   movdqa %xmm0, %xmm2
+;   movdqa %xmm1, %xmm0
+;   movdqa %xmm2, %xmm1
+;   pblendvb %xmm0, %xmm7, %xmm1
+;   movdqa %xmm1, %xmm0
 ;   movq    %rbp, %rsp
-;   popq    %rbp
+;   popq %rbp
 ;   ret
 ;
 ; Disassembled:
@@ -63,20 +63,20 @@ block0(v0: f64, v1: f64):
 }
 
 ; VCode:
-;   pushq   %rbp
+;   pushq %rbp
 ;   movq    %rsp, %rbp
 ; block0:
 ;   addsd %xmm1, %xmm0
 ;   movabsq $9221120237041090560, %r9
-;   movq    %r9, %xmm1
-;   movdqa  %xmm0, %xmm7
+;   movq %r9, %xmm1
+;   movdqa %xmm0, %xmm7
 ;   cmppd   $3, %xmm7, %xmm0, %xmm7
-;   movdqa  %xmm0, %xmm5
-;   movdqa  %xmm7, %xmm0
-;   pblendvb %xmm5, %xmm1, %xmm5
-;   movdqa  %xmm5, %xmm0
+;   movdqa %xmm0, %xmm5
+;   movdqa %xmm7, %xmm0
+;   pblendvb %xmm0, %xmm1, %xmm5
+;   movdqa %xmm5, %xmm0
 ;   movq    %rbp, %rsp
-;   popq    %rbp
+;   popq %rbp
 ;   ret
 ;
 ; Disassembled:
@@ -104,20 +104,20 @@ block0(v0: f32, v1: f32):
 }
 
 ; VCode:
-;   pushq   %rbp
+;   pushq %rbp
 ;   movq    %rsp, %rbp
 ; block0:
 ;   addss %xmm1, %xmm0
 ;   movl    $2143289344, %r9d
-;   movd    %r9d, %xmm1
-;   movdqa  %xmm0, %xmm7
+;   movd %r9d, %xmm1
+;   movdqa %xmm0, %xmm7
 ;   cmpps   $3, %xmm7, %xmm0, %xmm7
-;   movdqa  %xmm0, %xmm5
-;   movdqa  %xmm7, %xmm0
-;   pblendvb %xmm5, %xmm1, %xmm5
-;   movdqa  %xmm5, %xmm0
+;   movdqa %xmm0, %xmm5
+;   movdqa %xmm7, %xmm0
+;   pblendvb %xmm0, %xmm1, %xmm5
+;   movdqa %xmm5, %xmm0
 ;   movq    %rbp, %rsp
-;   popq    %rbp
+;   popq %rbp
 ;   ret
 ;
 ; Disassembled:

@@ -6,15 +6,15 @@ use crate::{Reachability, TRAP_INTERNAL_ASSERT};
 use cranelift_codegen::ir::immediates::Offset32;
 use cranelift_codegen::{
     cursor::FuncCursor,
-    ir::{self, condcodes::IntCC, InstBuilder},
+    ir::{self, InstBuilder, condcodes::IntCC},
 };
 use cranelift_entity::packed_option::ReservedValue;
 use cranelift_frontend::FunctionBuilder;
 use smallvec::SmallVec;
 use wasmtime_environ::{
-    wasm_unsupported, Collector, GcArrayLayout, GcLayout, GcStructLayout, ModuleInternedTypeIndex,
+    Collector, GcArrayLayout, GcLayout, GcStructLayout, I31_DISCRIMINANT, ModuleInternedTypeIndex,
     PtrSize, TypeIndex, VMGcKind, WasmHeapTopType, WasmHeapType, WasmRefType, WasmResult,
-    WasmStorageType, WasmValType, I31_DISCRIMINANT,
+    WasmStorageType, WasmValType, wasm_unsupported,
 };
 
 #[cfg(feature = "gc-drc")]
@@ -153,7 +153,12 @@ fn read_field_at_addr(
                         .call(get_interned_func_ref, &[vmctx, func_ref_id, expected_ty]);
                     builder.func.dfg.first_result(call_inst)
                 }
-                WasmHeapTopType::Cont => todo!(), // FIXME: #10248 stack switching support.
+                WasmHeapTopType::Cont => {
+                    // TODO(#10248) GC integration for stack switching
+                    return Err(wasmtime_environ::WasmError::Unsupported(
+                        "Stack switching feature not compatbile with GC, yet".to_string(),
+                    ));
+                }
             },
         },
     };
@@ -307,7 +312,9 @@ pub fn translate_struct_get(
     struct_ref: ir::Value,
     extension: Option<Extension>,
 ) -> WasmResult<ir::Value> {
-    log::trace!("translate_struct_get({struct_type_index:?}, {field_index:?}, {struct_ref:?}, {extension:?})");
+    log::trace!(
+        "translate_struct_get({struct_type_index:?}, {field_index:?}, {struct_ref:?}, {extension:?})"
+    );
 
     // TODO: If we know we have a `(ref $my_struct)` here, instead of maybe a
     // `(ref null $my_struct)`, we could omit the `trapz`. But plumbing that
@@ -538,7 +545,9 @@ fn emit_array_fill_impl(
         ir::Value,
     ) -> WasmResult<()>,
 ) -> WasmResult<()> {
-    log::trace!("emit_array_fill_impl(elem_addr: {elem_addr:?}, elem_size: {elem_size:?}, fill_end: {fill_end:?})");
+    log::trace!(
+        "emit_array_fill_impl(elem_addr: {elem_addr:?}, elem_size: {elem_size:?}, fill_end: {fill_end:?})"
+    );
 
     let pointer_ty = func_env.pointer_type();
 
@@ -1028,6 +1037,8 @@ pub fn translate_ref_test(
         | WasmHeapType::NoExtern
         | WasmHeapType::Func
         | WasmHeapType::NoFunc
+        | WasmHeapType::Cont
+        | WasmHeapType::NoCont
         | WasmHeapType::I31 => unreachable!("handled top, bottom, and i31 types above"),
 
         // For these abstract but non-top and non-bottom types, we check the
@@ -1082,8 +1093,12 @@ pub fn translate_ref_test(
 
             func_env.is_subtype(builder, actual_shared_ty, expected_shared_ty)
         }
-
-        WasmHeapType::Cont | WasmHeapType::ConcreteCont(_) | WasmHeapType::NoCont => todo!(), // FIXME: #10248 stack switching support.
+        WasmHeapType::ConcreteCont(_) => {
+            // TODO(#10248) GC integration for stack switching
+            return Err(wasmtime_environ::WasmError::Unsupported(
+                "Stack switching feature not compatbile with GC, yet".to_string(),
+            ));
+        }
     };
     builder.ins().jump(continue_block, &[result.into()]);
 
@@ -1405,8 +1420,9 @@ impl FuncEnvironment<'_> {
             WasmHeapType::Func | WasmHeapType::ConcreteFunc(_) | WasmHeapType::NoFunc => {
                 unreachable!()
             }
-
-            WasmHeapType::Cont | WasmHeapType::ConcreteCont(_) | WasmHeapType::NoCont => todo!(), // FIXME: #10248 stack switching support.
+            WasmHeapType::Cont | WasmHeapType::ConcreteCont(_) | WasmHeapType::NoCont => {
+                unreachable!()
+            }
         };
 
         match (ty.nullable, might_be_i31) {

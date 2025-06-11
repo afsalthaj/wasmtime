@@ -31,11 +31,11 @@ const _: () = {
 /// has been created through a [`Linker`](wasmtime::component::Linker).
 ///
 /// For more information see [`Foo`] as well.
-pub struct FooPre<T> {
+pub struct FooPre<T: 'static> {
     instance_pre: wasmtime::component::InstancePre<T>,
     indices: FooIndices,
 }
-impl<T> Clone for FooPre<T> {
+impl<T: 'static> Clone for FooPre<T> {
     fn clone(&self) -> Self {
         Self {
             instance_pre: self.instance_pre.clone(),
@@ -43,7 +43,7 @@ impl<T> Clone for FooPre<T> {
         }
     }
 }
-impl<_T> FooPre<_T> {
+impl<_T: 'static> FooPre<_T> {
     /// Creates a new copy of `FooPre` bindings which can then
     /// be used to instantiate into a particular store.
     ///
@@ -185,14 +185,16 @@ const _: () = {
             let indices = FooIndices::new(&instance.instance_pre(&store))?;
             indices.load(&mut store, instance)
         }
-        pub fn add_to_linker<T, U>(
+        pub fn add_to_linker<T, D>(
             linker: &mut wasmtime::component::Linker<T>,
-            get: impl Fn(&mut T) -> &mut U + Send + Sync + Copy + 'static,
+            host_getter: fn(&mut T) -> D::Data<'_>,
         ) -> wasmtime::Result<()>
         where
-            U: foo::foo::i::Host,
+            D: wasmtime::component::HasData,
+            for<'a> D::Data<'a>: foo::foo::i::Host,
+            T: 'static,
         {
-            foo::foo::i::add_to_linker(linker, get)?;
+            foo::foo::i::add_to_linker::<T, D>(linker, host_getter)?;
             Ok(())
         }
         pub fn call_f<S: wasmtime::AsContextMut>(
@@ -220,26 +222,19 @@ pub mod foo {
                 assert!(2 == < T as wasmtime::component::ComponentType >::ALIGN32);
             };
             pub trait Host {}
-            pub fn add_to_linker_get_host<T, G>(
+            impl<_T: Host + ?Sized> Host for &mut _T {}
+            pub fn add_to_linker<T, D>(
                 linker: &mut wasmtime::component::Linker<T>,
-                host_getter: G,
+                host_getter: fn(&mut T) -> D::Data<'_>,
             ) -> wasmtime::Result<()>
             where
-                G: for<'a> wasmtime::component::GetHost<&'a mut T, Host: Host>,
+                D: wasmtime::component::HasData,
+                for<'a> D::Data<'a>: Host,
+                T: 'static,
             {
                 let mut inst = linker.instance("foo:foo/i")?;
                 Ok(())
             }
-            pub fn add_to_linker<T, U>(
-                linker: &mut wasmtime::component::Linker<T>,
-                get: impl Fn(&mut T) -> &mut U + Send + Sync + Copy + 'static,
-            ) -> wasmtime::Result<()>
-            where
-                U: Host,
-            {
-                add_to_linker_get_host(linker, get)
-            }
-            impl<_T: Host + ?Sized> Host for &mut _T {}
         }
     }
 }

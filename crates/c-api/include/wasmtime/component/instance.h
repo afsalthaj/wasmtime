@@ -1,3 +1,5 @@
+/// \file wasmtime/component/instance.h
+
 #ifndef WASMTIME_COMPONENT_INSTANCE_H
 #define WASMTIME_COMPONENT_INSTANCE_H
 
@@ -23,12 +25,12 @@ typedef struct wasmtime_component_instance {
   /// Internal identifier of what store this belongs to, never zero.
   uint64_t store_id;
   /// Internal index within the store.
-  size_t index;
+  uint32_t __private;
 } wasmtime_component_instance_t;
 
 /**
- * \brief A methods similar to \fn wasmtime_component_get_export_index() except
- * for this instance.
+ * \brief A methods similar to #wasmtime_component_get_export_index except for
+ * this instance.
  *
  * \param instance the instance to look up \p name in
  * \param context the context where \p instance lives in

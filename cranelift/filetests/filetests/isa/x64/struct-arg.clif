@@ -8,13 +8,13 @@ block0(v0: i64):
 }
 
 ; VCode:
-;   pushq   %rbp
+;   pushq %rbp
 ;   movq    %rsp, %rbp
 ; block0:
 ;   lea     rbp(stack args max - 64), %rsi
-;   movzbq  0(%rsi), %rax
+;   movzbq (%rsi), %rax
 ;   movq    %rbp, %rsp
-;   popq    %rbp
+;   popq %rbp
 ;   ret
 ;
 ; Disassembled:
@@ -37,15 +37,15 @@ block0(v0: i64, v1: i64):
 }
 
 ; VCode:
-;   pushq   %rbp
+;   pushq %rbp
 ;   movq    %rsp, %rbp
 ; block0:
 ;   lea     rbp(stack args max - 64), %rcx
-;   movzbq  0(%rdi), %rax
-;   movzbq  0(%rcx), %r9
+;   movzbq (%rdi), %rax
+;   movzbq (%rcx), %r9
 ;   addl %r9d, %eax
 ;   movq    %rbp, %rsp
-;   popq    %rbp
+;   popq %rbp
 ;   ret
 ;
 ; Disassembled:
@@ -70,7 +70,7 @@ block0(v0: i64):
 }
 
 ; VCode:
-;   pushq   %rbp
+;   pushq %rbp
 ;   movq    %rsp, %rbp
 ;   subq $0x40, %rsp
 ; block0:
@@ -82,7 +82,7 @@ block0(v0: i64):
 ;   call    User(userextname0)
 ;   addq $0x40, %rsp
 ;   movq    %rbp, %rsp
-;   popq    %rbp
+;   popq %rbp
 ;   ret
 ;
 ; Disassembled:
@@ -111,7 +111,7 @@ block0(v0: i64, v1: i64):
 }
 
 ; VCode:
-;   pushq   %rbp
+;   pushq %rbp
 ;   movq    %rsp, %rbp
 ;   subq $0x50, %rsp
 ;   movq    %r14, 64(%rsp)
@@ -123,10 +123,10 @@ block0(v0: i64, v1: i64):
 ;   call    *%r11
 ;   movq    %r14, %rdi
 ;   call    User(userextname0)
-;   movq    64(%rsp), %r14
+;   movq 0x40(%rsp), %r14
 ;   addq $0x50, %rsp
 ;   movq    %rbp, %rsp
-;   popq    %rbp
+;   popq %rbp
 ;   ret
 ;
 ; Disassembled:
@@ -158,16 +158,16 @@ block0(v0: i64, v1: i64):
 }
 
 ; VCode:
-;   pushq   %rbp
+;   pushq %rbp
 ;   movq    %rsp, %rbp
 ; block0:
 ;   lea     rbp(stack args max - 192), %rsi
 ;   lea     rbp(stack args max - 64), %rcx
-;   movzbq  0(%rsi), %rax
-;   movzbq  0(%rcx), %r9
+;   movzbq (%rsi), %rax
+;   movzbq (%rcx), %r9
 ;   addl %r9d, %eax
 ;   movq    %rbp, %rsp
-;   popq    %rbp
+;   popq %rbp
 ;   ret
 ;
 ; Disassembled:
@@ -193,7 +193,7 @@ block0(v0: i64, v1: i64, v2: i64):
 }
 
 ; VCode:
-;   pushq   %rbp
+;   pushq %rbp
 ;   movq    %rsp, %rbp
 ;   subq $0xd0, %rsp
 ;   movq    %rbx, 192(%rsp)
@@ -212,11 +212,11 @@ block0(v0: i64, v1: i64, v2: i64):
 ;   call    *%r10
 ;   movq    %r13, %rdi
 ;   call    User(userextname0)
-;   movq    192(%rsp), %rbx
-;   movq    200(%rsp), %r13
+;   movq 0xc0(%rsp), %rbx
+;   movq 0xc8(%rsp), %r13
 ;   addq $0xd0, %rsp
 ;   movq    %rbp, %rsp
-;   popq    %rbp
+;   popq %rbp
 ;   ret
 ;
 ; Disassembled:

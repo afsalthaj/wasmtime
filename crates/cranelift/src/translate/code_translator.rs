@@ -71,30 +71,30 @@
 //!   <https://github.com/bytecodealliance/cranelift/pull/1236>
 //!     ("Relax verification to allow I8X16 to act as a default vector type")
 
-use crate::bounds_checks::{bounds_check_and_compute_addr, BoundsCheck};
+use crate::Reachability;
+use crate::bounds_checks::{BoundsCheck, bounds_check_and_compute_addr};
 use crate::func_environ::{Extension, FuncEnvironment};
 use crate::translate::environ::{GlobalVariable, StructFieldsVec};
 use crate::translate::state::{ControlStackFrame, ElseData, FuncTranslationState};
 use crate::translate::translation_utils::{
     block_with_params, blocktype_params_results, f32_translation, f64_translation,
 };
-use crate::Reachability;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::immediates::Offset32;
 use cranelift_codegen::ir::{
     self, AtomicRmwOp, InstBuilder, JumpTableData, MemFlags, Value, ValueLabel,
 };
-use cranelift_codegen::ir::{types::*, BlockArg};
+use cranelift_codegen::ir::{BlockArg, types::*};
 use cranelift_codegen::packed_option::ReservedValue;
 use cranelift_frontend::{FunctionBuilder, Variable};
 use itertools::Itertools;
 use smallvec::SmallVec;
-use std::collections::{hash_map, HashMap};
+use std::collections::{HashMap, hash_map};
 use std::vec::Vec;
 use wasmparser::{FuncValidator, MemArg, Operator, WasmModuleResources};
 use wasmtime_environ::{
-    wasm_unsupported, DataIndex, ElemIndex, FuncIndex, GlobalIndex, MemoryIndex, Signed,
-    TableIndex, TypeConvert, TypeIndex, Unsigned, WasmRefType, WasmResult,
+    DataIndex, ElemIndex, FuncIndex, GlobalIndex, MemoryIndex, Signed, TableIndex, TypeConvert,
+    TypeIndex, Unsigned, WasmRefType, WasmResult, wasm_unsupported,
 };
 
 /// Given a `Reachability<T>`, unwrap the inner `T` or, when unreachable, set
@@ -2898,6 +2898,56 @@ pub fn translate_operator(
             // representation, so we don't actually need to do anything.
         }
 
+        Operator::ContNew { cont_type_index: _ } => {
+            // TODO(10248) This is added in a follow-up PR
+            return Err(wasmtime_environ::WasmError::Unsupported(
+                "codegen for stack switching instructions not implemented, yet".to_string(),
+            ));
+        }
+        Operator::ContBind {
+            argument_index: _,
+            result_index: _,
+        } => {
+            // TODO(10248) This is added in a follow-up PR
+            return Err(wasmtime_environ::WasmError::Unsupported(
+                "codegen for stack switching instructions not implemented, yet".to_string(),
+            ));
+        }
+        Operator::Suspend { tag_index: _ } => {
+            // TODO(10248) This is added in a follow-up PR
+            return Err(wasmtime_environ::WasmError::Unsupported(
+                "codegen for stack switching instructions not implemented, yet".to_string(),
+            ));
+        }
+        Operator::Resume {
+            cont_type_index: _,
+            resume_table: _,
+        } => {
+            // TODO(10248) This is added in a follow-up PR
+            return Err(wasmtime_environ::WasmError::Unsupported(
+                "codegen for stack switching instructions not implemented, yet".to_string(),
+            ));
+        }
+        Operator::ResumeThrow {
+            cont_type_index: _,
+            tag_index: _,
+            resume_table: _,
+        } => {
+            // TODO(10248) This depends on exception handling
+            return Err(wasmtime_environ::WasmError::Unsupported(
+                "resume.throw instructions not supported, yet".to_string(),
+            ));
+        }
+        Operator::Switch {
+            cont_type_index: _,
+            tag_index: _,
+        } => {
+            // TODO(10248) This is added in a follow-up PR
+            return Err(wasmtime_environ::WasmError::Unsupported(
+                "codegen for stack switching instructions not implemented, yet".to_string(),
+            ));
+        }
+
         Operator::GlobalAtomicGet { .. }
         | Operator::GlobalAtomicSet { .. }
         | Operator::GlobalAtomicRmwAdd { .. }
@@ -2936,17 +2986,6 @@ pub fn translate_operator(
         | Operator::RefI31Shared { .. } => {
             return Err(wasm_unsupported!(
                 "shared-everything-threads operators are not yet implemented"
-            ));
-        }
-
-        Operator::ContNew { .. }
-        | Operator::ContBind { .. }
-        | Operator::Suspend { .. }
-        | Operator::Resume { .. }
-        | Operator::ResumeThrow { .. }
-        | Operator::Switch { .. } => {
-            return Err(wasm_unsupported!(
-                "stack-switching operators are not yet implemented"
             ));
         }
 
@@ -3447,7 +3486,7 @@ fn translate_atomic_rmw(
             return Err(wasm_unsupported!(
                 "atomic_rmw: unsupported access type {:?}",
                 access_ty
-            ))
+            ));
         }
     };
     let w_ty_ok = match widened_ty {
@@ -3500,7 +3539,7 @@ fn translate_atomic_cas(
             return Err(wasm_unsupported!(
                 "atomic_cas: unsupported access type {:?}",
                 access_ty
-            ))
+            ));
         }
     };
     let w_ty_ok = match widened_ty {
@@ -3552,7 +3591,7 @@ fn translate_atomic_load(
             return Err(wasm_unsupported!(
                 "atomic_load: unsupported access type {:?}",
                 access_ty
-            ))
+            ));
         }
     };
     let w_ty_ok = match widened_ty {
@@ -3597,7 +3636,7 @@ fn translate_atomic_store(
             return Err(wasm_unsupported!(
                 "atomic_store: unsupported access type {:?}",
                 access_ty
-            ))
+            ));
         }
     };
     let d_ty_ok = match data_ty {

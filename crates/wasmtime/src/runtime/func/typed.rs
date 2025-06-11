@@ -128,14 +128,11 @@ where
     ///
     /// [`Trap`]: crate::Trap
     #[cfg(feature = "async")]
-    pub async fn call_async<T>(
+    pub async fn call_async(
         &self,
-        mut store: impl AsContextMut<Data = T>,
+        mut store: impl AsContextMut<Data: Send>,
         params: Params,
-    ) -> Result<Results>
-    where
-        T: Send,
-    {
+    ) -> Result<Results> {
         let mut store = store.as_context_mut();
         assert!(
             store.0.async_support(),
@@ -549,7 +546,7 @@ unsafe impl WasmTy for Func {
 
     #[inline]
     fn compatible_with_store(&self, store: &StoreOpaque) -> bool {
-        store.store_data().contains(self.0)
+        self.store == store.id()
     }
 
     #[inline]
@@ -587,7 +584,7 @@ unsafe impl WasmTy for Option<Func> {
     #[inline]
     fn compatible_with_store(&self, store: &StoreOpaque) -> bool {
         if let Some(f) = self {
-            store.store_data().contains(f.0)
+            f.compatible_with_store(store)
         } else {
             true
         }
@@ -606,7 +603,9 @@ unsafe impl WasmTy for Option<Func> {
         } else if nullable {
             Ok(())
         } else {
-            bail!("argument type mismatch: expected non-nullable (ref {expected}), found null reference")
+            bail!(
+                "argument type mismatch: expected non-nullable (ref {expected}), found null reference"
+            )
         }
     }
 

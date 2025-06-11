@@ -12,13 +12,8 @@
 
 use super::ByteSink;
 use crate::isa::x64::inst::args::{Amode, OperandSize};
-use crate::isa::x64::inst::{regs, Inst, LabelUse};
+use crate::isa::x64::inst::{Inst, LabelUse, regs};
 use crate::machinst::{MachBuffer, Reg, RegClass};
-
-pub(crate) fn low8_will_sign_extend_to_64(x: u32) -> bool {
-    let xs = (x as i32) as i64;
-    xs == ((xs << 56) >> 56)
-}
 
 pub(crate) fn low8_will_sign_extend_to_32(x: u32) -> bool {
     let xs = x as i32;

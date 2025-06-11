@@ -6,7 +6,7 @@ use crate::AsReg;
 ///
 /// This container wraps true register type `R` to allow users to specify their
 /// own; by default this will use `u8`.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Gpr<R: AsReg = u8>(pub(crate) R);
 
 impl<R: AsReg> Gpr<R> {
@@ -43,6 +43,12 @@ impl<R: AsReg> AsRef<R> for Gpr<R> {
 impl<R: AsReg> AsMut<R> for Gpr<R> {
     fn as_mut(&mut self) -> &mut R {
         &mut self.0
+    }
+}
+
+impl<R: AsReg> From<R> for Gpr<R> {
+    fn from(reg: R) -> Gpr<R> {
+        Gpr(reg)
     }
 }
 
@@ -93,6 +99,12 @@ impl<R: AsReg> NonRspGpr<R> {
 impl<R: AsReg> AsMut<R> for NonRspGpr<R> {
     fn as_mut(&mut self) -> &mut R {
         &mut self.0
+    }
+}
+
+impl<R: AsReg> From<R> for NonRspGpr<R> {
+    fn from(reg: R) -> NonRspGpr<R> {
+        NonRspGpr(reg)
     }
 }
 

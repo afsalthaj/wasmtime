@@ -9,15 +9,15 @@ block0(v1: i32, v2: i64):
 }
 
 ; VCode:
-;   pushq   %rbp
+;   pushq %rbp
 ;   movq    %rsp, %rbp
 ; block0:
-;   movl    0(%rsi), %edx
+;   movl (%rsi), %edx
 ;   cmpl    %edi, %edx
 ;   movq    %rdi, %rax
 ;   cmovnbl %edx, %eax, %eax
 ;   movq    %rbp, %rsp
-;   popq    %rbp
+;   popq %rbp
 ;   ret
 ;
 ; Disassembled:

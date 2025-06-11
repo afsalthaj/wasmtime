@@ -6,7 +6,7 @@ mod inst;
 mod operand;
 
 use crate::dsl;
-use cranelift_srcgen::{fmtln, Formatter};
+use cranelift_srcgen::{Formatter, fmtln};
 
 /// Generate the Rust assembler code; e.g., `enum Inst { ... }`.
 pub fn rust_assembler(f: &mut Formatter, insts: &[dsl::Inst]) {
@@ -47,7 +47,7 @@ fn generate_inst_enum(f: &mut Formatter, insts: &[dsl::Inst]) {
 
 /// `#[derive(...)]`
 fn generate_derive(f: &mut Formatter) {
-    fmtln!(f, "#[derive(Clone, Debug)]");
+    fmtln!(f, "#[derive(Copy, Clone, Debug)]");
     fmtln!(
         f,
         "#[cfg_attr(any(test, feature = \"fuzz\"), derive(arbitrary::Arbitrary))]"
@@ -57,7 +57,10 @@ fn generate_derive(f: &mut Formatter) {
 /// Adds a custom bound to the `Arbitrary` implementation which ensures that
 /// the associated registers are all `Arbitrary` as well.
 fn generate_derive_arbitrary_bounds(f: &mut Formatter) {
-    fmtln!(f, "#[cfg_attr(any(test, feature = \"fuzz\"), arbitrary(bound = \"R: crate::fuzz::RegistersArbitrary\"))]");
+    fmtln!(
+        f,
+        "#[cfg_attr(any(test, feature = \"fuzz\"), arbitrary(bound = \"R: crate::fuzz::RegistersArbitrary\"))]"
+    );
 }
 
 /// `impl std::fmt::Display for Inst { ... }`
@@ -69,7 +72,7 @@ fn generate_inst_display_impl(f: &mut Formatter, insts: &[dsl::Inst]) {
                 f.add_block("match self", |f| {
                     for inst in insts {
                         let variant_name = inst.name();
-                        fmtln!(f, "Self::{variant_name}(i) => write!(f, \"{{i}}\"),");
+                        fmtln!(f, "Self::{variant_name}(i) => i.fmt(f),");
                     }
                 });
             },

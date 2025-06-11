@@ -283,7 +283,7 @@ jobs:
         toolchain: wasmtime-ci-pinned-nightly
 
     # Build C API documentation
-    - run: curl -L https://sourceforge.net/projects/doxygen/files/rel-1.9.3/doxygen-1.9.3.linux.bin.tar.gz/download | tar xzf -
+    - run: curl -L https://github.com/doxygen/doxygen/releases/download/Release_1_9_3/doxygen-1.9.3.linux.bin.tar.gz | tar xzf -
     - run: echo "`pwd`/doxygen-1.9.3/bin" >> $GITHUB_PATH
     - run: cmake -S crates/c-api -B target/c-api
     - run: cmake --build target/c-api --target doc
@@ -371,15 +371,18 @@ jobs:
               -p wasmtime --no-default-features --features threads
               -p wasmtime --no-default-features --features runtime,threads
               -p wasmtime --no-default-features --features cranelift,threads
+              -p wasmtime --no-default-features --features stack-switching
+              -p wasmtime --no-default-features --features cranelift,stack-switching
+              -p wasmtime --no-default-features --features runtime,stack-switching
               -p wasmtime --features incremental-cache
               -p wasmtime --features profile-pulley
               -p wasmtime --all-features
 
           - name: wasmtime-fiber
             checks: |
-              -p wasmtime-fiber --no-default-features
-              -p wasmtime-fiber --no-default-features --features std
-              -p wasmtime-fiber --all-features
+              -p wasmtime-internal-fiber --no-default-features
+              -p wasmtime-internal-fiber --no-default-features --features std
+              -p wasmtime-internal-fiber --all-features
 
           - name: wasmtime-cli
             checks: |
@@ -443,7 +446,7 @@ jobs:
       with:
         submodules: true
     - uses: ./.github/actions/install-rust
-    - run: cargo test -p wasmtime-fiber --no-default-features
+    - run: cargo test -p wasmtime-internal-fiber --no-default-features
     - run: cargo test -p cranelift-tools --test logged-filetests
 
     # common logic to cancel the entire run if this job fails
@@ -778,7 +781,7 @@ jobs:
         echo CARGO_PROFILE_DEV_OPT_LEVEL=2 >> $GITHUB_ENV
         echo CARGO_PROFILE_TEST_OPT_LEVEL=2 >> $GITHUB_ENV
         echo RUSTFLAGS=-Zsanitizer=address >> $GITHUB_ENV
-        echo RUSTDOCFLAGS=-Zsanitizer=address >> $GITHUB_ENV
+        echo RUSTDOCFLAGS="-Zsanitizer=address -Copt-level=2 -Ccodegen-units=16" >> $GITHUB_ENV
       if: ${{ contains(matrix.name, 'ASAN') }}
 
     # Record some CPU details; this is helpful information if tests fail due
@@ -812,8 +815,15 @@ jobs:
       if: matrix.filter == 'linux-x64' && contains(matrix.bucket, 'wasmtime-cli')
       uses: abrown/install-vtune-action@v1
 
-    # Build and test all features
-    - run: ./ci/run-tests.sh --locked ${{ matrix.bucket }}
+    # Build and test all features.
+    #
+    # Note that this uses a different shell, notably not `bash` on Windows. In
+    # the past `bash` would add more items to `PATH` on Windows which would
+    # interfere and cause the `gcc.exe` executable to fail and exit with 1 and
+    # no output. It's believed that `bash` adds things like `/usr/bin` to PATH
+    # which is the wrong DLL or something like that.
+    - run: python3 ./ci/run-tests.py --locked ${{ matrix.bucket }}
+      shell: pwsh
 
     # common logic to cancel the entire run if this job fails
     - uses: ./.github/actions/cancel-on-failure
@@ -1082,7 +1092,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - crate: "wasmtime --features pulley"
+          - crate: "wasmtime"
           - crate: "wasmtime-cli"
           - crate: "wasmtime-environ --all-features"
           - crate: "pulley-interpreter --all-features"

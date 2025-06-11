@@ -6,7 +6,7 @@ use smallvec::SmallVec;
 pub use super::MachLabel;
 use super::RetPair;
 pub use crate::ir::{condcodes::CondCode, *};
-pub use crate::isa::{unwind::UnwindInst, TargetIsa};
+pub use crate::isa::{TargetIsa, unwind::UnwindInst};
 pub use crate::machinst::{
     ABIArg, ABIArgSlot, ABIMachineSpec, InputSourceInst, Lower, LowerBackend, RealReg, Reg,
     RelocDistance, Sig, TryCallInfo, VCodeInst, Writable,
@@ -413,8 +413,20 @@ macro_rules! isle_lower_prelude_methods {
         }
 
         #[inline]
+        fn emit_u64_be_const(&mut self, value: u64) -> VCodeConstant {
+            let data = VCodeConstantData::U64(value.to_be_bytes());
+            self.lower_ctx.use_constant(data)
+        }
+
+        #[inline]
         fn emit_u128_le_const(&mut self, value: u128) -> VCodeConstant {
             let data = VCodeConstantData::Generated(value.to_le_bytes().as_slice().into());
+            self.lower_ctx.use_constant(data)
+        }
+
+        #[inline]
+        fn emit_u128_be_const(&mut self, value: u128) -> VCodeConstant {
+            let data = VCodeConstantData::Generated(value.to_be_bytes().as_slice().into());
             self.lower_ctx.use_constant(data)
         }
 
@@ -513,11 +525,12 @@ macro_rules! isle_lower_prelude_methods {
             dst: WritableReg,
             stack_slot: DynamicStackSlot,
         ) -> MInst {
-            assert!(self
-                .lower_ctx
-                .abi()
-                .dynamic_stackslot_offsets()
-                .is_valid(stack_slot));
+            assert!(
+                self.lower_ctx
+                    .abi()
+                    .dynamic_stackslot_offsets()
+                    .is_valid(stack_slot)
+            );
             self.lower_ctx
                 .abi()
                 .dynamic_stackslot_addr(stack_slot, dst)

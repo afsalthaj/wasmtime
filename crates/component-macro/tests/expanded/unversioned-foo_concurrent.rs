@@ -6,11 +6,11 @@
 /// has been created through a [`Linker`](wasmtime::component::Linker).
 ///
 /// For more information see [`Nope`] as well.
-pub struct NopePre<T> {
+pub struct NopePre<T: 'static> {
     instance_pre: wasmtime::component::InstancePre<T>,
     indices: NopeIndices,
 }
-impl<T> Clone for NopePre<T> {
+impl<T: 'static> Clone for NopePre<T> {
     fn clone(&self) -> Self {
         Self {
             instance_pre: self.instance_pre.clone(),
@@ -18,7 +18,7 @@ impl<T> Clone for NopePre<T> {
         }
     }
 }
-impl<_T> NopePre<_T> {
+impl<_T: 'static> NopePre<_T> {
     /// Creates a new copy of `NopePre` bindings which can then
     /// be used to instantiate into a particular store.
     ///
@@ -48,7 +48,7 @@ impl<_T> NopePre<_T> {
         mut store: impl wasmtime::AsContextMut<Data = _T>,
     ) -> wasmtime::Result<Nope>
     where
-        _T: Send + 'static,
+        _T: Send,
     {
         let mut store = store.as_context_mut();
         let instance = self.instance_pre.instantiate_async(&mut store).await?;
@@ -130,7 +130,7 @@ const _: () = {
             linker: &wasmtime::component::Linker<_T>,
         ) -> wasmtime::Result<Nope>
         where
-            _T: Send + 'static,
+            _T: Send,
         {
             let pre = linker.instantiate_pre(component)?;
             NopePre::new(pre)?.instantiate_async(store).await
@@ -144,15 +144,16 @@ const _: () = {
             let indices = NopeIndices::new(&instance.instance_pre(&store))?;
             indices.load(&mut store, instance)
         }
-        pub fn add_to_linker<T, U>(
+        pub fn add_to_linker<T, D>(
             linker: &mut wasmtime::component::Linker<T>,
-            get: impl Fn(&mut T) -> &mut U + Send + Sync + Copy + 'static,
+            host_getter: fn(&mut T) -> D::Data<'_>,
         ) -> wasmtime::Result<()>
         where
-            T: Send + foo::foo::a::Host<Data = T> + 'static,
-            U: Send + foo::foo::a::Host<Data = T>,
+            D: foo::foo::a::HostConcurrent + Send,
+            for<'a> D::Data<'a>: foo::foo::a::Host + Send,
+            T: 'static + Send,
         {
-            foo::foo::a::add_to_linker(linker, get)?;
+            foo::foo::a::add_to_linker::<T, D>(linker, host_getter)?;
             Ok(())
         }
     }
@@ -191,86 +192,38 @@ pub mod foo {
                 assert!(12 == < Error as wasmtime::component::ComponentType >::SIZE32);
                 assert!(4 == < Error as wasmtime::component::ComponentType >::ALIGN32);
             };
-            pub trait Host {
-                type Data;
-                fn g(
-                    store: wasmtime::StoreContextMut<'_, Self::Data>,
-                ) -> impl ::core::future::Future<
-                    Output = impl FnOnce(
-                        wasmtime::StoreContextMut<'_, Self::Data>,
-                    ) -> Result<(), Error> + Send + Sync + 'static,
-                > + Send + Sync + 'static
+            #[wasmtime::component::__internal::trait_variant_make(::core::marker::Send)]
+            pub trait HostConcurrent: wasmtime::component::HasData + Send {
+                fn g<T: 'static>(
+                    accessor: &mut wasmtime::component::Accessor<T, Self>,
+                ) -> impl ::core::future::Future<Output = Result<(), Error>> + Send
                 where
                     Self: Sized;
             }
-            pub fn add_to_linker_get_host<T, G>(
+            #[wasmtime::component::__internal::trait_variant_make(::core::marker::Send)]
+            pub trait Host: Send {}
+            impl<_T: Host + ?Sized + Send> Host for &mut _T {}
+            pub fn add_to_linker<T, D>(
                 linker: &mut wasmtime::component::Linker<T>,
-                host_getter: G,
+                host_getter: fn(&mut T) -> D::Data<'_>,
             ) -> wasmtime::Result<()>
             where
-                G: for<'a> wasmtime::component::GetHost<
-                    &'a mut T,
-                    Host: Host<Data = T> + Send,
-                >,
-                T: Send + 'static,
+                D: HostConcurrent,
+                for<'a> D::Data<'a>: Host,
+                T: 'static + Send,
             {
                 let mut inst = linker.instance("foo:foo/a")?;
                 inst.func_wrap_concurrent(
                     "g",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = caller;
-                        let r = <G::Host as Host>::g(host);
-                        Box::pin(async move {
-                            let fun = r.await;
-                            Box::new(move |mut caller: wasmtime::StoreContextMut<'_, T>| {
-                                let r = fun(caller);
-                                Ok((r,))
-                            })
-                                as Box<
-                                    dyn FnOnce(
-                                        wasmtime::StoreContextMut<'_, T>,
-                                    ) -> wasmtime::Result<(Result<(), Error>,)> + Send + Sync,
-                                >
+                    move |caller: &mut wasmtime::component::Accessor<T>, (): ()| {
+                        wasmtime::component::__internal::Box::pin(async move {
+                            let accessor = &mut unsafe { caller.with_data(host_getter) };
+                            let r = <D as HostConcurrent>::g(accessor).await;
+                            Ok((r,))
                         })
-                            as ::core::pin::Pin<
-                                Box<
-                                    dyn ::core::future::Future<
-                                        Output = Box<
-                                            dyn FnOnce(
-                                                wasmtime::StoreContextMut<'_, T>,
-                                            ) -> wasmtime::Result<(Result<(), Error>,)> + Send + Sync,
-                                        >,
-                                    > + Send + Sync + 'static,
-                                >,
-                            >
                     },
                 )?;
                 Ok(())
-            }
-            pub fn add_to_linker<T, U>(
-                linker: &mut wasmtime::component::Linker<T>,
-                get: impl Fn(&mut T) -> &mut U + Send + Sync + Copy + 'static,
-            ) -> wasmtime::Result<()>
-            where
-                U: Host<Data = T> + Send,
-                T: Send + 'static,
-            {
-                add_to_linker_get_host(linker, get)
-            }
-            impl<_T: Host> Host for &mut _T {
-                type Data = _T::Data;
-                fn g(
-                    store: wasmtime::StoreContextMut<'_, Self::Data>,
-                ) -> impl ::core::future::Future<
-                    Output = impl FnOnce(
-                        wasmtime::StoreContextMut<'_, Self::Data>,
-                    ) -> Result<(), Error> + Send + Sync + 'static,
-                > + Send + Sync + 'static
-                where
-                    Self: Sized,
-                {
-                    <_T as Host>::g(store)
-                }
             }
         }
     }

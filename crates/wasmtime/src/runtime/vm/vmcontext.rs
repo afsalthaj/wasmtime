@@ -5,8 +5,9 @@ mod vm_host_func_context;
 
 pub use self::vm_host_func_context::VMArrayCallHostFuncContext;
 use crate::prelude::*;
-use crate::runtime::vm::{f32x4, f64x2, i8x16, GcStore, InterpreterRef, VMGcRef, VmPtr, VmSafe};
+use crate::runtime::vm::{GcStore, InterpreterRef, VMGcRef, VmPtr, VmSafe, f32x4, f64x2, i8x16};
 use crate::store::StoreOpaque;
+use crate::vm::stack_switching::VMStackChain;
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::fmt;
@@ -14,10 +15,9 @@ use core::marker;
 use core::mem::{self, MaybeUninit};
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicUsize, Ordering};
-use sptr::Strict;
 use wasmtime_environ::{
-    BuiltinFunctionIndex, DefinedMemoryIndex, Unsigned, VMSharedTypeIndex, WasmHeapTopType,
-    WasmValType, VMCONTEXT_MAGIC,
+    BuiltinFunctionIndex, DefinedGlobalIndex, DefinedMemoryIndex, DefinedTableIndex,
+    DefinedTagIndex, Unsigned, VMCONTEXT_MAGIC, VMSharedTypeIndex, WasmHeapTopType, WasmValType,
 };
 
 /// A function pointer that exposes the array calling convention.
@@ -144,20 +144,23 @@ mod test_vmfunction_body {
 /// imported from another instance.
 #[derive(Debug, Copy, Clone)]
 #[repr(C)]
-pub struct VMTable {
+pub struct VMTableImport {
     /// A pointer to the imported table description.
     pub from: VmPtr<VMTableDefinition>,
 
     /// A pointer to the `VMContext` that owns the table description.
     pub vmctx: VmPtr<VMContext>,
+
+    /// The table index, within `vmctx`, this definition resides at.
+    pub index: DefinedTableIndex,
 }
 
 // SAFETY: the above structure is repr(C) and only contains `VmSafe` fields.
-unsafe impl VmSafe for VMTable {}
+unsafe impl VmSafe for VMTableImport {}
 
 #[cfg(test)]
 mod test_vmtable {
-    use super::VMTable;
+    use super::VMTableImport;
     use core::mem::offset_of;
     use std::mem::size_of;
     use wasmtime_environ::component::{Component, VMComponentOffsets};
@@ -167,20 +170,19 @@ mod test_vmtable {
     fn check_vmtable_offsets() {
         let module = Module::new();
         let offsets = VMOffsets::new(HostPtr, &module);
-        assert_eq!(size_of::<VMTable>(), usize::from(offsets.size_of_vmtable()));
         assert_eq!(
-            offset_of!(VMTable, from),
-            usize::from(offsets.vmtable_from())
+            size_of::<VMTableImport>(),
+            usize::from(offsets.size_of_vmtable_import())
         );
         assert_eq!(
-            offset_of!(VMTable, vmctx),
-            usize::from(offsets.vmtable_vmctx())
+            offset_of!(VMTableImport, from),
+            usize::from(offsets.vmtable_import_from())
         );
     }
 
     #[test]
     fn ensure_sizes_match() {
-        // Because we use `VMTable` for recording tables used by components, we
+        // Because we use `VMTableImport` for recording tables used by components, we
         // want to make sure that the size calculations between `VMOffsets` and
         // `VMComponentOffsets` stay the same.
         let module = Module::new();
@@ -188,8 +190,8 @@ mod test_vmtable {
         let component = Component::default();
         let vm_component_offsets = VMComponentOffsets::new(HostPtr, &component);
         assert_eq!(
-            vm_offsets.size_of_vmtable(),
-            vm_component_offsets.size_of_vmtable()
+            vm_offsets.size_of_vmtable_import(),
+            vm_component_offsets.size_of_vmtable_import()
         );
     }
 }
@@ -231,10 +233,6 @@ mod test_vmmemory_import {
             offset_of!(VMMemoryImport, from),
             usize::from(offsets.vmmemory_import_from())
         );
-        assert_eq!(
-            offset_of!(VMMemoryImport, vmctx),
-            usize::from(offsets.vmmemory_import_vmctx())
-        );
     }
 }
 
@@ -249,10 +247,38 @@ mod test_vmmemory_import {
 pub struct VMGlobalImport {
     /// A pointer to the imported global variable description.
     pub from: VmPtr<VMGlobalDefinition>,
+
+    /// A pointer to the context that owns the global.
+    ///
+    /// Exactly what's stored here is dictated by `kind` below. This is `None`
+    /// for `VMGlobalKind::Host`, it's a `VMContext` for
+    /// `VMGlobalKind::Instance`, and it's `VMComponentContext` for
+    /// `VMGlobalKind::ComponentFlags`.
+    pub vmctx: Option<VmPtr<VMOpaqueContext>>,
+
+    /// The kind of global, and extra location information in addition to
+    /// `vmctx` above.
+    pub kind: VMGlobalKind,
 }
 
 // SAFETY: the above structure is repr(C) and only contains `VmSafe` fields.
 unsafe impl VmSafe for VMGlobalImport {}
+
+/// The kinds of globals that Wasmtime has.
+#[derive(Debug, Copy, Clone)]
+#[repr(C, u32)]
+pub enum VMGlobalKind {
+    /// Host globals, stored in a `StoreOpaque`.
+    Host(DefinedGlobalIndex),
+    /// Instance globals, stored in `VMContext`s
+    Instance(DefinedGlobalIndex),
+    /// Flags for a component instance, stored in `VMComponentContext`.
+    #[cfg(feature = "component-model")]
+    ComponentFlags(wasmtime_environ::component::RuntimeComponentInstanceIndex),
+}
+
+// SAFETY: the above enum is repr(C) and stores nothing else
+unsafe impl VmSafe for VMGlobalKind {}
 
 #[cfg(test)]
 mod test_vmglobal_import {
@@ -283,6 +309,12 @@ mod test_vmglobal_import {
 pub struct VMTagImport {
     /// A pointer to the imported tag description.
     pub from: VmPtr<VMTagDefinition>,
+
+    /// The instance that owns this tag.
+    pub vmctx: VmPtr<VMContext>,
+
+    /// The index of the tag in the containing `vmctx`.
+    pub index: DefinedTagIndex,
 }
 
 // SAFETY: the above structure is repr(C) and only contains `VmSafe` fields.
@@ -515,7 +547,7 @@ impl VMGlobalDefinition {
                     global.init_gc_ref(store.gc_store_mut()?, r.as_ref())
                 }
                 WasmHeapTopType::Func => *global.as_func_ref_mut() = raw.get_funcref().cast(),
-                WasmHeapTopType::Cont => todo!(), // FIXME: #10248 stack switching support.
+                WasmHeapTopType::Cont => *global.as_func_ref_mut() = raw.get_funcref().cast(), // TODO(#10248): temporary hack.
             },
         }
         Ok(global)
@@ -1078,6 +1110,10 @@ pub struct VMStoreContext {
     /// Used to find the end of a contiguous sequence of Wasm frames when
     /// walking the stack.
     pub last_wasm_entry_fp: UnsafeCell<usize>,
+
+    /// Stack information used by stack switching instructions. See documentation
+    /// on `VMStackChain` for details.
+    pub stack_chain: UnsafeCell<VMStackChain>,
 }
 
 // The `VMStoreContext` type is a pod-type with no destructor, and we don't
@@ -1103,6 +1139,7 @@ impl Default for VMStoreContext {
             last_wasm_exit_fp: UnsafeCell::new(0),
             last_wasm_exit_pc: UnsafeCell::new(0),
             last_wasm_entry_fp: UnsafeCell::new(0),
+            stack_chain: UnsafeCell::new(VMStackChain::Absent),
         }
     }
 }
@@ -1153,6 +1190,10 @@ mod test_vmstore_context {
             offset_of!(VMStoreContext, last_wasm_entry_fp),
             usize::from(offsets.ptr.vmstore_context_last_wasm_entry_fp())
         );
+        assert_eq!(
+            offset_of!(VMStoreContext, stack_chain),
+            usize::from(offsets.ptr.vmstore_context_stack_chain())
+        )
     }
 }
 
@@ -1409,7 +1450,7 @@ impl ValRaw {
     #[inline]
     pub fn funcref(i: *mut c_void) -> ValRaw {
         ValRaw {
-            funcref: Strict::map_addr(i, |i| i.to_le()),
+            funcref: i.map_addr(|i| i.to_le()),
         }
     }
 
@@ -1474,7 +1515,7 @@ impl ValRaw {
     /// Gets the WebAssembly `funcref` value
     #[inline]
     pub fn get_funcref(&self) -> *mut c_void {
-        unsafe { Strict::map_addr(self.funcref, |i| usize::from_le(i)) }
+        unsafe { self.funcref.map_addr(|i| usize::from_le(i)) }
     }
 
     /// Gets the WebAssembly `externref` value

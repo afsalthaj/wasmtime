@@ -115,9 +115,9 @@
 //! time this may want to be revisited if too many adapter modules are being
 //! created.
 
+use crate::EntityType;
 use crate::component::translate::*;
 use crate::fact;
-use crate::EntityType;
 use std::collections::HashSet;
 
 /// Metadata information about a fused adapter.
@@ -246,7 +246,7 @@ impl<'data> Translator<'_, 'data> {
                 .map(|(arg, (_, _, ty))| fact_import_to_core_def(component, arg, ty))
                 .collect::<Vec<_>>();
             let static_index = self.static_modules.push(translation);
-            let id = component.adapter_modules.push((static_index, args.into()));
+            let id = component.adapter_modules.push((static_index, args));
             assert_eq!(id, module_id);
         }
     }
@@ -257,6 +257,16 @@ fn fact_import_to_core_def(
     import: &fact::Import,
     ty: EntityType,
 ) -> dfg::CoreDef {
+    fn unwrap_memory(def: &dfg::CoreDef) -> dfg::CoreExport<MemoryIndex> {
+        match def {
+            dfg::CoreDef::Export(e) => e.clone().map_index(|i| match i {
+                EntityIndex::Memory(i) => i,
+                _ => unreachable!(),
+            }),
+            _ => unreachable!(),
+        }
+    }
+
     let mut simple_intrinsic = |trampoline: dfg::Trampoline| {
         let signature = ty.unwrap_func();
         let index = dfg
@@ -273,16 +283,6 @@ fn fact_import_to_core_def(
             to,
             to64,
         } => {
-            fn unwrap_memory(def: &dfg::CoreDef) -> dfg::CoreExport<MemoryIndex> {
-                match def {
-                    dfg::CoreDef::Export(e) => e.clone().map_index(|i| match i {
-                        EntityIndex::Memory(i) => i,
-                        _ => unreachable!(),
-                    }),
-                    _ => unreachable!(),
-                }
-            }
-
             let from = dfg.memories.push(unwrap_memory(from));
             let to = dfg.memories.push(unwrap_memory(to));
             let signature = ty.unwrap_func();
@@ -304,17 +304,18 @@ fn fact_import_to_core_def(
         }
         fact::Import::ResourceEnterCall => simple_intrinsic(dfg::Trampoline::ResourceEnterCall),
         fact::Import::ResourceExitCall => simple_intrinsic(dfg::Trampoline::ResourceExitCall),
-        fact::Import::SyncEnterCall => simple_intrinsic(dfg::Trampoline::SyncEnterCall),
-        fact::Import::SyncExitCall { callback } => {
-            simple_intrinsic(dfg::Trampoline::SyncExitCall {
+        fact::Import::PrepareCall { memory } => simple_intrinsic(dfg::Trampoline::PrepareCall {
+            memory: memory.as_ref().map(|v| dfg.memories.push(unwrap_memory(v))),
+        }),
+        fact::Import::SyncStartCall { callback } => {
+            simple_intrinsic(dfg::Trampoline::SyncStartCall {
                 callback: callback.clone().map(|v| dfg.callbacks.push(v)),
             })
         }
-        fact::Import::AsyncEnterCall => simple_intrinsic(dfg::Trampoline::AsyncEnterCall),
-        fact::Import::AsyncExitCall {
+        fact::Import::AsyncStartCall {
             callback,
             post_return,
-        } => simple_intrinsic(dfg::Trampoline::AsyncExitCall {
+        } => simple_intrinsic(dfg::Trampoline::AsyncStartCall {
             callback: callback.clone().map(|v| dfg.callbacks.push(v)),
             post_return: post_return.clone().map(|v| dfg.post_returns.push(v)),
         }),

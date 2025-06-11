@@ -1,19 +1,20 @@
 //! Implementation of the standard x64 ABI.
 
-use crate::ir::{self, types, LibCall, MemFlags, Signature, TrapCode};
-use crate::ir::{types::*, ExternalName};
+use crate::CodegenResult;
+use crate::ir::{self, LibCall, MemFlags, Signature, TrapCode, types};
+use crate::ir::{ExternalName, types::*};
 use crate::isa;
 use crate::isa::winch;
-use crate::isa::{unwind::UnwindInst, x64::inst::*, x64::settings as x64_settings, CallConv};
+use crate::isa::{CallConv, unwind::UnwindInst, x64::inst::*, x64::settings as x64_settings};
 use crate::machinst::abi::*;
 use crate::machinst::*;
 use crate::settings;
-use crate::CodegenResult;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use args::*;
+use cranelift_assembler_x64 as asm;
 use regalloc2::{MachineEnv, PReg, PRegSet};
-use smallvec::{smallvec, SmallVec};
+use smallvec::{SmallVec, smallvec};
 use std::borrow::ToOwned;
 use std::sync::OnceLock;
 
@@ -537,7 +538,9 @@ impl ABIMachineSpec for X64ABIMachineSpec {
         let mut insts = SmallVec::new();
         // `push %rbp`
         // RSP before the call will be 0 % 16.  So here, it is 8 % 16.
-        insts.push(Inst::push64(RegMemImm::reg(r_rbp)));
+        insts.push(Inst::External {
+            inst: asm::inst::pushq_o::new(Gpr::new(r_rbp).unwrap()).into(),
+        });
 
         if flags.unwind_info() {
             insts.push(Inst::Unwind {
@@ -568,7 +571,9 @@ impl ABIMachineSpec for X64ABIMachineSpec {
             Writable::from_reg(regs::rsp()),
         ));
         // `pop %rbp`
-        insts.push(Inst::pop64(Writable::from_reg(regs::rbp())));
+        insts.push(Inst::External {
+            inst: asm::inst::popq_o::new(Writable::from_reg(Gpr::new(regs::rbp()).unwrap())).into(),
+        });
         insts
     }
 
@@ -656,10 +661,10 @@ impl ABIMachineSpec for X64ABIMachineSpec {
             let incoming_args_diff = i32::try_from(incoming_args_diff).unwrap();
 
             // Move the saved frame pointer down by `incoming_args_diff`.
-            insts.push(Inst::mov64_m_r(
-                Amode::imm_reg(incoming_args_diff, regs::rsp()),
-                Writable::from_reg(regs::r11()),
-            ));
+            let addr = Amode::imm_reg(incoming_args_diff, regs::rsp());
+            let r11 = Writable::from_reg(regs::r11());
+            let inst = asm::inst::movq_rm::new(r11, addr).into();
+            insts.push(Inst::External { inst });
             insts.push(Inst::mov_r_m(
                 OperandSize::Size64,
                 regs::r11(),
@@ -667,10 +672,10 @@ impl ABIMachineSpec for X64ABIMachineSpec {
             ));
 
             // Move the saved return address down by `incoming_args_diff`.
-            insts.push(Inst::mov64_m_r(
-                Amode::imm_reg(incoming_args_diff + 8, regs::rsp()),
-                Writable::from_reg(regs::r11()),
-            ));
+            let addr = Amode::imm_reg(incoming_args_diff + 8, regs::rsp());
+            let r11 = Writable::from_reg(regs::r11());
+            let inst = asm::inst::movq_rm::new(r11, addr).into();
+            insts.push(Inst::External { inst });
             insts.push(Inst::mov_r_m(
                 OperandSize::Size64,
                 regs::r11(),

@@ -10,17 +10,17 @@ block0(v0: i128):
 }
 
 ; VCode:
-;   pushq   %rbp
+;   pushq %rbp
 ;   movq    %rsp, %rbp
 ; block0:
 ;   movq    %rdi, %r8
 ;   movabsq $-1, %rcx
-;   bsrq    %rsi, %r9
+;   bsrq %rsi, %r9
 ;   cmovzq  %rcx, %r9, %r9
 ;   movl    $63, %edi
 ;   subq %r9, %rdi
 ;   movabsq $-1, %rdx
-;   bsrq    %r8, %r10
+;   bsrq %r8, %r10
 ;   cmovzq  %rdx, %r10, %r10
 ;   movl    $63, %eax
 ;   subq %r10, %rax
@@ -30,7 +30,7 @@ block0(v0: i128):
 ;   uninit  %rdx
 ;   xorq %rdx, %rdx
 ;   movq    %rbp, %rsp
-;   popq    %rbp
+;   popq %rbp
 ;   ret
 ;
 ; Disassembled:
@@ -64,16 +64,16 @@ block0(v0: i64):
 }
 
 ; VCode:
-;   pushq   %rbp
+;   pushq %rbp
 ;   movq    %rsp, %rbp
 ; block0:
 ;   movabsq $-1, %rax
-;   bsrq    %rdi, %r8
+;   bsrq %rdi, %r8
 ;   cmovzq  %rax, %r8, %r8
 ;   movl    $63, %eax
 ;   subq %r8, %rax
 ;   movq    %rbp, %rsp
-;   popq    %rbp
+;   popq %rbp
 ;   ret
 ;
 ; Disassembled:
@@ -97,16 +97,16 @@ block0(v0: i32):
 }
 
 ; VCode:
-;   pushq   %rbp
+;   pushq %rbp
 ;   movq    %rsp, %rbp
 ; block0:
 ;   movabsq $-1, %rax
-;   bsrl    %edi, %r8d
+;   bsrl %edi, %r8d
 ;   cmovzl  %eax, %r8d, %r8d
 ;   movl    $31, %eax
 ;   subl %r8d, %eax
 ;   movq    %rbp, %rsp
-;   popq    %rbp
+;   popq %rbp
 ;   ret
 ;
 ; Disassembled:
@@ -130,18 +130,18 @@ block0(v0: i16):
 }
 
 ; VCode:
-;   pushq   %rbp
+;   pushq %rbp
 ;   movq    %rsp, %rbp
 ; block0:
-;   movzwq  %di, %rax
+;   movzwq %di, %rax
 ;   movabsq $-1, %rdx
-;   bsrq    %rax, %r10
+;   bsrq %rax, %r10
 ;   cmovzq  %rdx, %r10, %r10
 ;   movl    $63, %eax
 ;   subq %r10, %rax
 ;   subq $0x30, %rax
 ;   movq    %rbp, %rsp
-;   popq    %rbp
+;   popq %rbp
 ;   ret
 ;
 ; Disassembled:
@@ -167,18 +167,18 @@ block0(v0: i8):
 }
 
 ; VCode:
-;   pushq   %rbp
+;   pushq %rbp
 ;   movq    %rsp, %rbp
 ; block0:
-;   movzbq  %dil, %rax
+;   movzbq %dil, %rax
 ;   movabsq $-1, %rdx
-;   bsrq    %rax, %r10
+;   bsrq %rax, %r10
 ;   cmovzq  %rdx, %r10, %r10
 ;   movl    $63, %eax
 ;   subq %r10, %rax
 ;   subq $0x38, %rax
 ;   movq    %rbp, %rsp
-;   popq    %rbp
+;   popq %rbp
 ;   ret
 ;
 ; Disassembled:

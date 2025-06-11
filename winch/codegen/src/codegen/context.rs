@@ -1,18 +1,18 @@
-use anyhow::{bail, ensure, Result};
+use anyhow::{Result, bail, ensure};
 use wasmparser::{Ieee32, Ieee64};
 use wasmtime_environ::{VMOffsets, WasmHeapType, WasmValType};
 
 use super::ControlStackFrame;
 use crate::{
-    abi::{scratch, vmctx, ABIOperand, ABIResults, RetArea},
+    abi::{ABIOperand, ABIResults, RetArea, vmctx},
     codegen::{BranchState, CodeGenError, CodeGenPhase, Emission, Prologue},
     frame::Frame,
     isa::reg::RegClass,
     masm::{
-        ExtractLaneKind, MacroAssembler, MemMoveDirection, OperandSize, RegImm, ReplaceLaneKind,
-        SPOffset, ShiftKind, StackSlot,
+        ExtractLaneKind, Imm, IntScratch, MacroAssembler, MemMoveDirection, OperandSize, RegImm,
+        ReplaceLaneKind, SPOffset, ShiftKind, StackSlot,
     },
-    reg::{writable, Reg, WritableReg},
+    reg::{Reg, WritableReg, writable},
     regalloc::RegAlloc,
     stack::{Stack, TypedReg, Val},
 };
@@ -64,7 +64,7 @@ impl<'a> CodeGenContext<'a, Emission> {
             let typed_reg = self.pop_to_reg(masm, None)?;
             masm.shift_ir(
                 writable!(typed_reg.reg),
-                val as u64,
+                Imm::i32(val),
                 typed_reg.reg,
                 kind,
                 OperandSize::S32,
@@ -93,7 +93,7 @@ impl<'a> CodeGenContext<'a, Emission> {
             let typed_reg = self.pop_to_reg(masm, None)?;
             masm.shift_ir(
                 writable!(typed_reg.reg),
-                val as u64,
+                Imm::i64(val),
                 typed_reg.reg,
                 kind,
                 OperandSize::S64,
@@ -288,15 +288,17 @@ impl<'a> CodeGenContext<'a, Emission> {
             Val::V128(v) => masm.store(RegImm::v128(v), addr, size)?,
             Val::Local(local) => {
                 let slot = self.frame.get_wasm_local(local.index);
-                let scratch = scratch!(M);
                 let local_addr = masm.local_address(&slot)?;
-                masm.load(local_addr, writable!(scratch), size)?;
-                masm.store(scratch.into(), addr, size)?;
+                masm.with_scratch::<IntScratch, _>(|masm, scratch| {
+                    masm.load(local_addr, scratch.writable(), size)?;
+                    masm.store(scratch.inner().into(), addr, size)
+                })?;
             }
             Val::Memory(_) => {
-                let scratch = scratch!(M, &ty);
-                masm.pop(writable!(scratch), size)?;
-                masm.store(scratch.into(), addr, size)?;
+                masm.with_scratch_for(ty, |masm, scratch| {
+                    masm.pop(scratch.writable(), size)?;
+                    masm.store(scratch.inner().into(), addr, size)
+                })?;
             }
         }
 
@@ -355,7 +357,7 @@ impl<'a> CodeGenContext<'a, Emission> {
     {
         let src = self.pop_to_reg(masm, None)?;
         let dst = self.pop_to_reg(masm, None)?;
-        let dst = emit(masm, dst.reg, src.reg.into(), size)?;
+        let dst = emit(masm, dst.reg, src.reg, size)?;
         self.free_reg(src);
         self.stack.push(dst.into());
 
@@ -664,7 +666,7 @@ impl<'a> CodeGenContext<'a, Emission> {
         &mut self,
         dest: &mut ControlStackFrame,
         masm: &mut M,
-        mut f: F,
+        mut maybe_pop_results: F,
     ) -> Result<()>
     where
         M: MacroAssembler,
@@ -675,15 +677,35 @@ impl<'a> CodeGenContext<'a, Emission> {
         let target_offset = state.target_offset;
         let base_offset = state.base_offset;
         let results_size = dest.results::<M>()?.size();
-        // Invariant: The stack pointer, must be greater or equal to
-        // the destination frame base stack pointer offset, given that
-        // we haven't popped any results by this point yet. But it may
-        // happen in the callback below.
+
+        maybe_pop_results(masm, self, dest)?;
+        // After calling `maybe_pop_results`, the stack pointer plus
+        // any result space needed, must be greater or equal to the
+        // destination frame base stack pointer offset.
+        //
+        // We check
+        //   current_sp + results >= base_offset
+        // as opposed to
+        //   current_sp >= base_offset
+        //
+        // To:
+        //  - Verify that `maybe_pop_results` popped exactly the right
+        //    amount relative to the base offset.
+        //  - Accomodate for multi-branch cases (i.e., `br_table`) in which
+        //    result handling happens only once and _could_ happen outside of
+        //    `maybe_pop_results` callback.
+        //
+        //
+        // Ensuring that the current stack pointer offset plus any
+        // result space is equal to or greater than the target branch
+        // base offset is the the most deterministic check at branch
+        // emission time since we can be certain that the base offset
+        // is the value recorded when a new control frame was pushed,
+        // upon which the expected target offset is calculated.
         ensure!(
-            masm.sp_offset()?.as_u32() >= base_offset.as_u32(),
+            (masm.sp_offset()?.as_u32() + results_size) >= base_offset.as_u32(),
             CodeGenError::invalid_sp_offset()
         );
-        f(masm, self, dest)?;
 
         // At jump sites, the machine stack might be left unbalanced,
         // due to register spills.
@@ -824,10 +846,12 @@ impl<'a> CodeGenContext<'a, Emission> {
                 Val::Local(local) => {
                     let slot = frame.get_wasm_local(local.index);
                     let addr = masm.local_address(&slot)?;
-                    let scratch = scratch!(M, &slot.ty);
-                    masm.load(addr, writable!(scratch), slot.ty.try_into()?)?;
-                    let stack_slot = masm.push(scratch, slot.ty.try_into()?)?;
-                    *v = Val::mem(slot.ty, stack_slot);
+                    masm.with_scratch_for(slot.ty, |masm, scratch| {
+                        masm.load(addr, scratch.writable(), slot.ty.try_into()?)?;
+                        let stack_slot = masm.push(scratch.inner(), slot.ty.try_into()?)?;
+                        *v = Val::mem(slot.ty, stack_slot);
+                        anyhow::Ok(())
+                    })?;
                 }
                 _ => {}
             }
