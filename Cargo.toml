@@ -377,7 +377,7 @@ async-trait = "0.1.71"
 trait-variant = "0.1.2"
 heck = "0.5"
 similar = "2.1.0"
-toml = "0.8.10"
+toml = "0.8.20"
 mach2 = "0.4.2"
 memfd = "0.6.2"
 psm = "0.1.11"
@@ -642,4 +642,3 @@ debug = "line-tables-only"
 inherits = "release"
 codegen-units = 1
 lto = true
-
