@@ -11,21 +11,23 @@ use async_trait::async_trait;
 use anyhow::{Context as _, Error, Result, anyhow, bail};
 use clap::Parser;
 use golem_rib_repl::{
-    ComponentSource, ReplDependencies, RibComponentMetadata, RibDependencyManager, RibRepl,
-    RibReplConfig, WorkerFunctionInvoke,
+    ComponentSource, ReplComponentDependencies, RibDependencyManager, RibRepl, RibReplConfig,
+    WorkerFunctionInvoke,
 };
+use golem_wasm_ast::analysis::AnalysedType;
 use golem_wasm_ast::analysis::analysed_type::tuple;
 use golem_wasm_ast::analysis::wit_parser::WitAnalysisContext;
-use golem_wasm_rpc::{parse_value_and_type, Value, ValueAndType};
+use golem_wasm_rpc::{Value, ValueAndType, parse_value_and_type};
+use rib::{
+    ComponentDependencies, ComponentDependency, ComponentDependencyKey, ParsedFunctionName,
+    ParsedFunctionReference,
+};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::{thread, vec};
-use golem_wasm_ast::analysis::AnalysedType;
-use rib::{ParsedFunctionName, ParsedFunctionReference};
-use uuid::Uuid;
-use wasi_common::sync::{ambient_authority, Dir, TcpListener, WasiCtxBuilder};
 use std::thread;
+use std::vec;
+use uuid::Uuid;
 use wasi_common::sync::{Dir, TcpListener, WasiCtxBuilder, ambient_authority};
 use wasmtime::{Engine, Func, Module, Store, StoreLimits, Val, ValType};
 use wasmtime_wasi::p2::{IoView, WasiView};
@@ -104,8 +106,8 @@ struct WasmtimeComponentDependencyManager {}
 
 #[async_trait]
 impl RibDependencyManager for WasmtimeComponentDependencyManager {
-    async fn get_dependencies(&self) -> anyhow::Result<ReplDependencies> {
-        Ok(ReplDependencies {
+    async fn get_dependencies(&self) -> anyhow::Result<ReplComponentDependencies> {
+        Ok(ReplComponentDependencies {
             component_dependencies: vec![],
         })
     }
@@ -114,28 +116,32 @@ impl RibDependencyManager for WasmtimeComponentDependencyManager {
         &self,
         source_path: &Path,
         component_name: String,
-    ) -> anyhow::Result<RibComponentMetadata> {
+    ) -> anyhow::Result<ComponentDependency> {
         let component_data = std::fs::read(source_path)?;
 
         let wit_analysis =
             WitAnalysisContext::new(&component_data).map_err(|err| anyhow!(err.reason))?;
 
-        let exports = wit_analysis
+        let component_exports = wit_analysis
             .get_top_level_exports()
             .map_err(|err| anyhow!(err.reason))?;
 
-        Ok(RibComponentMetadata {
+        let component_dependency_key = ComponentDependencyKey {
+            component_name: component_name.clone(),
             component_id: Uuid::new_v4(),
-            component_name,
-            metadata: exports,
-        })
+            root_package_name: None,
+            root_package_version: None,
+        };
+
+        let dependency = ComponentDependency::new(component_dependency_key, component_exports);
+
+        Ok(dependency)
     }
 }
 
-struct WasmtimeFunctionInvoke{
-    run_command: RunCommand
+struct WasmtimeFunctionInvoke {
+    run_command: RunCommand,
 }
-
 
 #[async_trait]
 impl WorkerFunctionInvoke for WasmtimeFunctionInvoke {
@@ -146,23 +152,21 @@ impl WorkerFunctionInvoke for WasmtimeFunctionInvoke {
         _worker_name: Option<String>,
         function_name: &str,
         args: Vec<ValueAndType>,
-        return_type: AnalysedType
-    ) -> anyhow::Result<ValueAndType> {
+        return_type: Option<AnalysedType>,
+    ) -> anyhow::Result<Option<ValueAndType>> {
         let run_command = self.run_command.clone();
-        run_command.invoke_component_function(function_name, args, &return_type).await
+        run_command
+            .invoke_component_function(function_name, args, return_type)
+            .await
     }
 }
 
 impl RunCommand {
-
     /// Execute Repl
     pub async fn execute_repl(self) -> Result<()> {
-
         let path = PathBuf::from(&self.module_and_args[0]);
 
-        let invoke = WasmtimeFunctionInvoke {
-            run_command: self
-        };
+        let invoke = WasmtimeFunctionInvoke { run_command: self };
 
         let repl_config = RibReplConfig {
             history_file: None,
@@ -174,6 +178,7 @@ impl RunCommand {
                 component_name: "singleton".to_string(),
             }),
             prompt: None,
+            command_registry: None,
         };
         let mut repl = RibRepl::bootstrap(repl_config).await?;
 
@@ -181,13 +186,12 @@ impl RunCommand {
         Ok(())
     }
 
-
     /// Invoke Component Function
     pub async fn invoke_component_function(
         mut self,
         function_name: &str,
         args: Vec<ValueAndType>,
-        return_type: &AnalysedType
+        return_type: Option<AnalysedType>,
     ) -> Result<ValueAndType> {
         //self.run.common.init_logging()?;
         let mut config = self.run.common.config(None)?;
@@ -220,8 +224,8 @@ impl RunCommand {
 
         let function_name_without_golem =
             match ParsedFunctionName::parse(function_name).unwrap().function {
-                ParsedFunctionReference::Function {function} => function,
-                _ => panic!("currently supporting only function types")
+                ParsedFunctionReference::Function { function } => function,
+                _ => panic!("currently supporting only function types"),
             };
 
         let function_name = format!("{}({})", function_name_without_golem, args);
@@ -236,15 +240,12 @@ impl RunCommand {
                 )
             })?;
 
-         let result = result[0].to_wave()?;
+        let result = result[0].to_wave()?;
 
-        let result =
-            parse_value_and_type(return_type, &result).map_err(|e| anyhow!(e))?;
+        let golem_result = parse_value_and_type(return_type, &result).map_err(|e| anyhow!(e))?;
 
         let golem_result =
-            ValueAndType::new(Value::Tuple(vec![result.value]), tuple(
-                vec![result.typ]
-            ));
+            ValueAndType::new(Value::Tuple(vec![result.value]), tuple(vec![result.typ]));
 
         Ok(golem_result)
     }
@@ -735,14 +736,8 @@ impl RunCommand {
         linker: &mut wasmtime::component::Linker<Host>,
     ) -> Result<Vec<wasmtime::component::Val>> {
         use wasmtime::component::{
-            Val,
-            types::ComponentItem,
-            wasm_wave::{untyped::UntypedFuncCall, wasm::WasmFunc},
-            Val,
-            wasm_wave::{
-                untyped::UntypedFuncCall,
-                wasm::{DisplayFuncResults, WasmFunc},
-            },
+            Val, types::ComponentItem, wasm_wave::untyped::UntypedFuncCall,
+            wasm_wave::wasm::WasmFunc,
         };
 
         let untyped_call = UntypedFuncCall::parse(invoke).with_context(|| {
