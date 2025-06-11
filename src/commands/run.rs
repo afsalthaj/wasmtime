@@ -192,7 +192,7 @@ impl RunCommand {
         function_name: &str,
         args: Vec<ValueAndType>,
         return_type: Option<AnalysedType>,
-    ) -> Result<ValueAndType> {
+    ) -> Result<Option<ValueAndType>> {
         //self.run.common.init_logging()?;
         let mut config = self.run.common.config(None)?;
         config.async_support(true);
@@ -242,12 +242,11 @@ impl RunCommand {
 
         let result = result[0].to_wave()?;
 
-        let golem_result = parse_value_and_type(return_type, &result).map_err(|e| anyhow!(e))?;
+        let result = return_type
+            .map(|return_type| parse_value_and_type(&return_type, &result).map_err(|e| anyhow!(e)))
+            .transpose()?;
 
-        let golem_result =
-            ValueAndType::new(Value::Tuple(vec![result.value]), tuple(vec![result.typ]));
-
-        Ok(golem_result)
+        Ok(result)
     }
 
     /// Executes the command.
