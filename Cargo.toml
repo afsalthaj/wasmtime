@@ -423,13 +423,13 @@ webpki-roots = "0.26.0"
 itertools = "0.14.0"
 base64 = "0.22.1"
 termcolor = "1.4.1"
-golem-rib-repl = { git = "https://github.com/golemcloud/golem.git", branch = "wasmtime_int" }
-golem-rib = {  git = "https://github.com/golemcloud/golem.git", branch = "wasmtime_int" }
-golem-wasm-ast = {  git = "https://github.com/golemcloud/golem.git", branch = "wasmtime_int", default-features = false, features = [
+golem-rib-repl = { git = "https://github.com/golemcloud/golem.git", tag = "v1.3.0-dev.11" }
+golem-rib = {  git = "https://github.com/golemcloud/golem.git", tag = "v1.3.0-dev.11" }
+golem-wasm-ast = {  git = "https://github.com/golemcloud/golem.git", tag = "v1.3.0-dev.11", default-features = false, features = [
     "analysis",
     "bincode",
 ] }
-golem-wasm-rpc = { git = "https://github.com/golemcloud/golem.git", branch = "wasmtime_int", default-features = false, features = ["typeinfo"] }
+golem-wasm-rpc = { git = "https://github.com/golemcloud/golem.git", tag = "v1.3.0-dev.11", default-features = false, features = ["typeinfo"] }
 uuid = { version = "1.2.2", features = ["v4"] }
 # =============================================================================
 #
