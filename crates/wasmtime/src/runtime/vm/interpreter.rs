@@ -188,7 +188,7 @@ impl InterpreterRef<'_> {
         mut self,
         mut bytecode: NonNull<u8>,
         callee: NonNull<VMOpaqueContext>,
-        caller: NonNull<VMOpaqueContext>,
+        caller: NonNull<VMContext>,
         args_and_results: NonNull<[ValRaw]>,
     ) -> bool {
         // Initialize argument registers with the ABI arguments.
@@ -473,6 +473,7 @@ fn trap(vm: &mut Vm, pc: NonNull<u8>, kind: Option<TrapKind>, setjmp: Setjmp) {
                     TrapKind::BadConversionToInteger => Trap::BadConversionToInteger,
                     TrapKind::MemoryOutOfBounds => Trap::MemoryOutOfBounds,
                     TrapKind::DisabledOpcode => Trap::DisabledOpcode,
+                    TrapKind::StackOverflow => Trap::StackOverflow,
                 };
                 s.set_jit_trap(regs, None, trap);
             }

@@ -8,7 +8,7 @@ use crate::isa::x64::inst::args::{
     Amode, CC, Gpr, RegMem, RegMemImm, SyntheticAmode, ToWritableReg,
 };
 use crate::machinst::pcc::*;
-use crate::machinst::{InsnIndex, VCode, VCodeConstantData};
+use crate::machinst::{InsnIndex, VCode};
 use crate::machinst::{Reg, Writable};
 use crate::trace;
 
@@ -53,8 +53,6 @@ pub(crate) fn check(
     let cmp_flags = state.cmp_flags.take();
 
     match vcode[inst_idx] {
-        Inst::Nop { .. } => Ok(()),
-
         Inst::Args { .. } => {
             // Defs on the args have "axiomatic facts": we trust the
             // ABI code to pass through the values unharmed, so the
@@ -74,82 +72,8 @@ pub(crate) fn check(
 
         Inst::CheckedSRemSeq8 { dst, .. } => undefined_result(ctx, vcode, dst, 64, 64),
 
-        Inst::Imm { simm64, dst, .. } => {
-            check_output(ctx, vcode, dst.to_writable_reg(), &[], |_vcode| {
-                Ok(Some(Fact::constant(64, simm64)))
-            })
-        }
-
-        Inst::MovRR { size, dst, .. } => {
-            undefined_result(ctx, vcode, dst, 64, size.to_bits().into())
-        }
-
         Inst::MovFromPReg { dst, .. } => undefined_result(ctx, vcode, dst, 64, 64),
         Inst::MovToPReg { .. } => Ok(()),
-
-        Inst::LoadEffectiveAddress {
-            ref addr,
-            dst,
-            size,
-        } => {
-            let addr = addr.clone();
-            let bits: u16 = size.to_bits().into();
-            check_output(ctx, vcode, dst.to_writable_reg(), &[], |vcode| {
-                let fact = if let SyntheticAmode::Real(amode) = &addr {
-                    compute_addr(ctx, vcode, amode, bits)
-                } else {
-                    None
-                };
-                clamp_range(ctx, 64, bits, fact)
-            })
-        }
-
-        Inst::MovImmM { size, ref dst, .. } => check_store(ctx, None, dst, vcode, size.to_type()),
-
-        Inst::MovRM { size, src, ref dst } => {
-            check_store(ctx, Some(src.to_reg()), dst, vcode, size.to_type())
-        }
-
-        Inst::CmpRmiR {
-            size,
-            src1,
-            ref src2,
-            ..
-        } => match <&RegMemImm>::from(src2) {
-            RegMemImm::Mem {
-                addr: SyntheticAmode::ConstantOffset(k),
-            } => {
-                match vcode.constants.get(*k) {
-                    VCodeConstantData::U64(bytes) => {
-                        let value = u64::from_le_bytes(*bytes);
-                        let lhs = get_fact_or_default(vcode, src1.to_reg(), 64);
-                        let rhs = Fact::constant(64, value);
-                        state.cmp_flags = Some((lhs, rhs));
-                    }
-                    _ => {}
-                }
-                Ok(())
-            }
-            RegMemImm::Mem { addr } => {
-                if let Some(rhs) = check_load(ctx, None, addr, vcode, size.to_type(), 64)? {
-                    let lhs = get_fact_or_default(vcode, src1.to_reg(), 64);
-                    state.cmp_flags = Some((lhs, rhs));
-                }
-                Ok(())
-            }
-            RegMemImm::Reg { reg } => {
-                let rhs = get_fact_or_default(vcode, *reg, 64);
-                let lhs = get_fact_or_default(vcode, src1.to_reg(), 64);
-                state.cmp_flags = Some((lhs, rhs));
-                Ok(())
-            }
-            RegMemImm::Imm { simm32 } => {
-                let lhs = get_fact_or_default(vcode, src1.to_reg(), 64);
-                let rhs = Fact::constant(64, (*simm32 as i32) as i64 as u64);
-                state.cmp_flags = Some((lhs, rhs));
-                Ok(())
-            }
-        },
 
         Inst::Setcc { dst, .. } => undefined_result(ctx, vcode, dst, 64, 64),
 
@@ -243,12 +167,6 @@ pub(crate) fn check(
             dst,
             src3: ref src2,
             ..
-        }
-        | Inst::XmmUnaryRmRVex {
-            op,
-            dst,
-            src: ref src2,
-            ..
         } => {
             let (ty, size) = match op {
                 AvxOpcode::Vmovss => (F32, 32),
@@ -277,11 +195,7 @@ pub(crate) fn check(
             ensure_no_fact(vcode, dst.to_writable_reg().to_reg())
         }
 
-        Inst::XmmMovRMVex { ref dst, .. } | Inst::XmmMovRMImmVex { ref dst, .. } => {
-            check_store(ctx, None, dst, vcode, I8X16)
-        }
-
-        Inst::XmmToGprImmVex { dst, .. } => ensure_no_fact(vcode, dst.to_writable_reg().to_reg()),
+        Inst::XmmMovRMVex { ref dst, .. } => check_store(ctx, None, dst, vcode, I8X16),
 
         Inst::CvtUint64ToFloatSeq {
             dst,
@@ -383,15 +297,12 @@ pub(crate) fn check(
         Inst::CallKnown { .. }
         | Inst::ReturnCallKnown { .. }
         | Inst::JmpKnown { .. }
-        | Inst::Ret { .. }
         | Inst::WinchJmpIf { .. }
         | Inst::JmpCond { .. }
         | Inst::JmpCondOr { .. }
         | Inst::TrapIf { .. }
         | Inst::TrapIfAnd { .. }
-        | Inst::TrapIfOr { .. }
-        | Inst::Hlt {}
-        | Inst::Ud2 { .. } => Ok(()),
+        | Inst::TrapIfOr { .. } => Ok(()),
         Inst::Rets { .. } => Ok(()),
 
         Inst::ReturnCallUnknown { .. } => Ok(()),
@@ -424,56 +335,14 @@ pub(crate) fn check(
             Ok(())
         }
 
-        Inst::LockCmpxchg {
-            ref mem, dst_old, ..
-        } => {
-            ensure_no_fact(vcode, dst_old.to_reg())?;
-            check_store(ctx, None, mem, vcode, I64)?;
-            Ok(())
-        }
-
-        Inst::LockCmpxchg16b {
-            ref mem,
-            dst_old_low,
-            dst_old_high,
-            ..
-        } => {
-            ensure_no_fact(vcode, dst_old_low.to_reg())?;
-            ensure_no_fact(vcode, dst_old_high.to_reg())?;
-            check_store(ctx, None, mem, vcode, I128)?;
-            Ok(())
-        }
-
-        Inst::LockXadd {
-            size,
-            ref mem,
-            dst_old,
-            operand: _,
-        } => {
-            ensure_no_fact(vcode, dst_old.to_reg())?;
-            check_store(ctx, None, mem, vcode, size.to_type())?;
-            Ok(())
-        }
-
-        Inst::Xchg {
-            size,
-            ref mem,
-            dst_old,
-            operand: _,
-        } => {
-            ensure_no_fact(vcode, dst_old.to_reg())?;
-            check_store(ctx, None, mem, vcode, size.to_type())?;
-            Ok(())
-        }
-
         Inst::AtomicRmwSeq {
             ref mem,
             temp,
             dst_old,
             ..
         } => {
-            ensure_no_fact(vcode, dst_old.to_reg())?;
-            ensure_no_fact(vcode, temp.to_reg())?;
+            ensure_no_fact(vcode, *dst_old.to_reg())?;
+            ensure_no_fact(vcode, *temp.to_reg())?;
             check_store(ctx, None, mem, vcode, I64)?;
             Ok(())
         }
@@ -486,10 +355,10 @@ pub(crate) fn check(
             dst_old_high,
             ..
         } => {
-            ensure_no_fact(vcode, dst_old_low.to_reg())?;
-            ensure_no_fact(vcode, dst_old_high.to_reg())?;
-            ensure_no_fact(vcode, temp_low.to_reg())?;
-            ensure_no_fact(vcode, temp_high.to_reg())?;
+            ensure_no_fact(vcode, *dst_old_low.to_reg())?;
+            ensure_no_fact(vcode, *dst_old_high.to_reg())?;
+            ensure_no_fact(vcode, *temp_low.to_reg())?;
+            ensure_no_fact(vcode, *temp_high.to_reg())?;
             check_store(ctx, None, mem, vcode, I128)?;
             Ok(())
         }
@@ -500,13 +369,11 @@ pub(crate) fn check(
             dst_old_high,
             ..
         } => {
-            ensure_no_fact(vcode, dst_old_low.to_reg())?;
-            ensure_no_fact(vcode, dst_old_high.to_reg())?;
+            ensure_no_fact(vcode, *dst_old_low.to_reg())?;
+            ensure_no_fact(vcode, *dst_old_high.to_reg())?;
             check_store(ctx, None, mem, vcode, I128)?;
             Ok(())
         }
-
-        Inst::Fence { .. } => Ok(()),
 
         Inst::XmmUninitializedValue { dst } => {
             ensure_no_fact(vcode, dst.to_writable_reg().to_reg())

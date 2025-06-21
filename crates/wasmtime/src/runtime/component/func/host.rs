@@ -179,7 +179,7 @@ where
         bail!("cannot leave component instance");
     }
 
-    let types = store[instance.id()].component().types().clone();
+    let types = instance.id().get(store.0).component().types().clone();
     let ty = &types[ty];
     let param_tys = InterfaceType::Tuple(ty.params);
     let result_tys = InterfaceType::Tuple(ty.results);
@@ -364,10 +364,10 @@ where
 
         fn lift_params(&self, cx: &mut LiftContext<'_>, ty: InterfaceType) -> Result<P> {
             match self.lift_src() {
-                Src::Direct(storage) => P::lift(cx, ty, storage),
+                Src::Direct(storage) => P::linear_lift_from_flat(cx, ty, storage),
                 Src::Indirect(ptr) => {
                     let ptr = validate_inbounds::<P>(cx.memory(), ptr)?;
-                    P::load(cx, ty, &cx.memory()[ptr..][..P::SIZE32])
+                    P::linear_lift_from_memory(cx, ty, &cx.memory()[ptr..][..P::SIZE32])
                 }
             }
         }
@@ -395,10 +395,10 @@ where
             ret: R,
         ) -> Result<()> {
             match self.lower_dst() {
-                Dst::Direct(storage) => ret.lower(cx, ty, storage),
+                Dst::Direct(storage) => ret.linear_lower_to_flat(cx, ty, storage),
                 Dst::Indirect(ptr) => {
                     let ptr = validate_inbounds::<R>(cx.as_slice_mut(), ptr)?;
-                    ret.store(cx, ty, ptr)
+                    ret.linear_lower_to_memory(cx, ty, ptr)
                 }
             }
         }
@@ -494,7 +494,7 @@ where
     let args;
     let ret_index;
 
-    let types = store[instance.id()].component().types().clone();
+    let types = instance.id().get(store.0).component().types().clone();
     let func_ty = &types[ty];
     let param_tys = &types[func_ty.params];
     let result_tys = &types[func_ty.results];

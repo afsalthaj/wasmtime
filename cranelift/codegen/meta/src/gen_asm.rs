@@ -162,7 +162,7 @@ fn generate_macro_inst_fn(f: &mut Formatter, inst: &Inst) {
                 (ty, var)
             };
             match results.as_slice() {
-                [] => fmtln!(f, "SideEffectNoResult::Inst(inst)"),
+                [] => fmtln!(f, "AssemblerOutputs::SideEffect {{ inst }}"),
                 [op] => match op.location.kind() {
                     Imm(_) => unreachable!(),
                     Reg(r) | FixedReg(r) => {
@@ -196,8 +196,28 @@ fn generate_macro_inst_fn(f: &mut Formatter, inst: &Inst) {
                         fmtln!(f, "let regs = ValueRegs::two(one, two);");
                         fmtln!(f, "AssemblerOutputs::RetValueRegs {{ inst, regs }}");
                     }
+                    (Reg(reg), Mem(_)) | (Mem(_) | RegMem(_), Reg(reg) | FixedReg(reg)) => {
+                        let (ty, var) = ty_var_of_reg(reg);
+                        fmtln!(f, "let {var} = {reg}.as_ref().{};", access_reg(op2));
+                        fmtln!(f, "AssemblerOutputs::Ret{ty} {{ inst, {var} }}");
+                    }
                     _ => unimplemented!("unhandled results: {results:?}"),
                 },
+
+                [op1, op2, op3] => match (
+                    op1.location.kind(),
+                    op2.location.kind(),
+                    op3.location.kind(),
+                ) {
+                    (FixedReg(loc1), FixedReg(loc2), Mem(_)) => {
+                        fmtln!(f, "let one = {loc1}.as_ref().{}.to_reg();", access_reg(op1));
+                        fmtln!(f, "let two = {loc2}.as_ref().{}.to_reg();", access_reg(op2));
+                        fmtln!(f, "let regs = ValueRegs::two(one, two);");
+                        fmtln!(f, "AssemblerOutputs::RetValueRegs {{ inst, regs }}");
+                    }
+                    _ => unimplemented!("unhandled results: {results:?}"),
+                },
+
                 _ => panic!("instruction has more than one result"),
             }
         },
@@ -274,16 +294,26 @@ enum IsleConstructor {
     /// This "special" constructor captures multiple written-to registers (e.g.
     /// `mul`).
     RetValueRegs,
+
+    /// This constructor does not return any results, but produces a side effect affecting EFLAGs.
+    NoReturnSideEffect,
+
+    /// This constructor produces no results, but the flags register is written,
+    /// so a `ProducesFlags` value is returned with a side effect.
+    ProducesFlagsSideEffect,
 }
 
 impl IsleConstructor {
     /// Returns the result type, in ISLE, that this constructor generates.
     fn result_ty(&self) -> &'static str {
         match self {
-            IsleConstructor::RetMemorySideEffect => "SideEffectNoResult",
             IsleConstructor::RetGpr => "Gpr",
             IsleConstructor::RetXmm => "Xmm",
             IsleConstructor::RetValueRegs => "ValueRegs",
+            IsleConstructor::NoReturnSideEffect | IsleConstructor::RetMemorySideEffect => {
+                "SideEffectNoResult"
+            }
+            IsleConstructor::ProducesFlagsSideEffect => "ProducesFlags",
         }
     }
 
@@ -291,10 +321,13 @@ impl IsleConstructor {
     /// type returned by [`Self::result_ty`].
     fn conversion_constructor(&self) -> &'static str {
         match self {
-            IsleConstructor::RetMemorySideEffect => "defer_side_effect",
+            IsleConstructor::NoReturnSideEffect | IsleConstructor::RetMemorySideEffect => {
+                "defer_side_effect"
+            }
             IsleConstructor::RetGpr => "emit_ret_gpr",
             IsleConstructor::RetXmm => "emit_ret_xmm",
             IsleConstructor::RetValueRegs => "emit_ret_value_regs",
+            IsleConstructor::ProducesFlagsSideEffect => "asm_produce_flags_side_effect",
         }
     }
 
@@ -302,7 +335,11 @@ impl IsleConstructor {
     fn suffix(&self) -> &'static str {
         match self {
             IsleConstructor::RetMemorySideEffect => "_mem",
-            IsleConstructor::RetGpr | IsleConstructor::RetXmm | IsleConstructor::RetValueRegs => "",
+            IsleConstructor::RetGpr
+            | IsleConstructor::RetXmm
+            | IsleConstructor::RetValueRegs
+            | IsleConstructor::NoReturnSideEffect
+            | IsleConstructor::ProducesFlagsSideEffect => "",
         }
     }
 
@@ -314,9 +351,11 @@ impl IsleConstructor {
     fn includes_write_only_reg_mem(&self) -> bool {
         match self {
             IsleConstructor::RetMemorySideEffect => true,
-            IsleConstructor::RetGpr | IsleConstructor::RetXmm | IsleConstructor::RetValueRegs => {
-                false
-            }
+            IsleConstructor::RetGpr
+            | IsleConstructor::RetXmm
+            | IsleConstructor::RetValueRegs
+            | IsleConstructor::NoReturnSideEffect
+            | IsleConstructor::ProducesFlagsSideEffect => false,
         }
     }
 }
@@ -331,9 +370,11 @@ fn isle_param_for_ctor(op: &Operand, ctor: IsleConstructor) -> String {
         // a `Gpr`.
         OperandKind::RegMem(_) if op.mutability.is_write() => match ctor {
             IsleConstructor::RetMemorySideEffect => "SyntheticAmode".to_string(),
+            IsleConstructor::NoReturnSideEffect => "".to_string(),
             IsleConstructor::RetGpr => "Gpr".to_string(),
             IsleConstructor::RetXmm => "Xmm".to_string(),
             IsleConstructor::RetValueRegs => "ValueRegs".to_string(),
+            IsleConstructor::ProducesFlagsSideEffect => todo!(),
         },
 
         // everything else is the same as the "raw" variant
@@ -356,9 +397,13 @@ fn isle_constructors(format: &Format) -> Vec<IsleConstructor> {
         .filter(|o| o.mutability.is_write())
         .collect::<Vec<_>>();
     match &write_operands[..] {
-        [] => unimplemented!(
-            "if you truly need this (and not a `SideEffect*`), add a `NoReturn` variant to `AssemblerOutputs`"
-        ),
+        [] => {
+            if format.eflags.is_write() {
+                vec![IsleConstructor::ProducesFlagsSideEffect]
+            } else {
+                vec![IsleConstructor::NoReturnSideEffect]
+            }
+        }
         [one] => match one.mutability {
             Read => unreachable!(),
             ReadWrite | Write => match one.location.kind() {
@@ -385,14 +430,27 @@ fn isle_constructors(format: &Format) -> Vec<IsleConstructor> {
                 },
             },
         },
-        [one, two] => {
-            // For now, we assume that if there are two results, they are coming
-            // from a register-writing instruction like `mul`. This can be
-            // expanded as needed.
-            assert!(matches!(one.location.kind(), FixedReg(_) | Reg(_)));
-            assert!(matches!(two.location.kind(), FixedReg(_) | Reg(_)));
-            vec![IsleConstructor::RetValueRegs]
-        }
+        [one, two] => match (one.location.kind(), two.location.kind()) {
+            (FixedReg(_) | Reg(_), FixedReg(_) | Reg(_)) => {
+                vec![IsleConstructor::RetValueRegs]
+            }
+            (Reg(r), Mem(_)) | (Mem(_) | RegMem(_), Reg(r) | FixedReg(r)) => {
+                assert!(matches!(r.reg_class().unwrap(), RegClass::Gpr));
+                vec![IsleConstructor::RetGpr]
+            }
+            other => panic!("unsupported number of write operands {other:?}"),
+        },
+        [one, two, three] => match (
+            one.location.kind(),
+            two.location.kind(),
+            three.location.kind(),
+        ) {
+            (FixedReg(_), FixedReg(_), Mem(_)) => {
+                vec![IsleConstructor::RetValueRegs]
+            }
+            other => panic!("unsupported number of write operands {other:?}"),
+        },
+
         other => panic!("unsupported number of write operands {other:?}"),
     }
 }
@@ -502,10 +560,14 @@ fn generate_isle_inst_decls(f: &mut Formatter, inst: &Inst) {
             .map(|o| {
                 assert!(matches!(o.location.kind(), OperandKind::RegMem(_)));
                 match ctor {
-                    IsleConstructor::RetMemorySideEffect => unreachable!(),
+                    IsleConstructor::RetMemorySideEffect | IsleConstructor::NoReturnSideEffect => {
+                        unreachable!()
+                    }
                     IsleConstructor::RetGpr => "(temp_writable_gpr)",
                     IsleConstructor::RetXmm => "(temp_writable_xmm)",
-                    IsleConstructor::RetValueRegs => todo!(),
+                    IsleConstructor::RetValueRegs | IsleConstructor::ProducesFlagsSideEffect => {
+                        todo!()
+                    }
                 }
             })
             .collect::<Vec<_>>()
@@ -519,31 +581,32 @@ fn generate_isle_inst_decls(f: &mut Formatter, inst: &Inst) {
 
         if let Some(alternate) = &inst.alternate {
             // We currently plan to use alternate instructions for SSE/AVX
-            // pairs, so we expect the destination register to be an XMM
+            // pairs, so we expect the one of the registers to be an XMM
             // register. In the future we could relax this, but would need to
             // handle more cases below.
-            assert!(matches!(
-                inst.format.operands.first().unwrap().location.reg_class(),
-                Some(RegClass::Xmm)
-            ));
+            assert!(
+                inst.format
+                    .operands
+                    .iter()
+                    .any(|o| matches!(o.location.reg_class(), Some(RegClass::Xmm)))
+            );
             let param_tys = if alternate.feature == Feature::avx {
                 param_tys.replace("Aligned", "")
             } else {
                 param_tys
             };
-            let name = inst.name();
             let alt_feature = alternate.feature.to_string();
             let alt_name = &alternate.name;
-            let rule_name = format!("x64_{name}_or_{alt_feature}");
-            fmtln!(f, "(decl {rule_name} ({param_tys}) {result_ty})");
-            fmtln!(f, "(rule 1 ({rule_name} {param_names})");
+            let rule_name_or_feat = format!("{rule_name}_or_{alt_feature}");
+            fmtln!(f, "(decl {rule_name_or_feat} ({param_tys}) {result_ty})");
+            fmtln!(f, "(rule 1 ({rule_name_or_feat} {param_names})");
             f.indent(|f| {
                 fmtln!(f, "(if-let true (use_{alt_feature}))");
-                fmtln!(f, "(x64_{alt_name} {param_names}))");
+                fmtln!(f, "(x64_{alt_name}{suffix} {param_names}))");
             });
             fmtln!(
                 f,
-                "(rule 0 ({rule_name} {param_names}) (x64_{name} {param_names}))"
+                "(rule 0 ({rule_name_or_feat} {param_names}) ({rule_name} {param_names}))"
             );
         }
     }

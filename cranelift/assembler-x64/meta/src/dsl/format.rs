@@ -17,13 +17,11 @@
 ///
 /// These model what the reference manual calls "instruction operand encodings,"
 /// usually defined in a table after an instruction's opcodes.
-pub fn fmt(
-    name: impl Into<String>,
-    operands: impl IntoIterator<Item = impl Into<Operand>>,
-) -> Format {
+pub fn fmt(name: impl Into<String>, operands: impl IntoIterator<Item = Operand>) -> Format {
     Format {
         name: name.into(),
-        operands: operands.into_iter().map(Into::into).collect(),
+        operands: operands.into_iter().collect(),
+        eflags: Eflags::default(),
     }
 }
 
@@ -126,6 +124,7 @@ pub fn sxw(location: Location) -> Operand {
 }
 
 /// A format describes the operands for an instruction.
+#[derive(Clone)]
 pub struct Format {
     /// This name, when combined with the instruction mnemonic, uniquely
     /// identifies an instruction. The reference manual uses this name in the
@@ -134,6 +133,8 @@ pub struct Format {
     /// These operands should match the "Instruction" column in the reference
     /// manual.
     pub operands: Vec<Operand>,
+    /// This should match eflags description of an instruction.
+    pub eflags: Eflags,
 }
 
 impl Format {
@@ -166,17 +167,38 @@ impl Format {
     pub fn operands_by_kind(&self) -> Vec<OperandKind> {
         self.locations().map(Location::kind).collect()
     }
+
+    /// Set the EFLAGS mutability for this instruction.
+    pub fn flags(mut self, eflags: Eflags) -> Self {
+        self.eflags = eflags;
+        self
+    }
+
+    /// Return true if an instruction uses EFLAGS.
+    pub fn uses_eflags(&self) -> bool {
+        self.eflags != Eflags::None
+    }
 }
 
 impl core::fmt::Display for Format {
     fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
-        let Format { name, operands } = self;
+        let Format {
+            name,
+            operands,
+            eflags,
+        } = self;
         let operands = operands
             .iter()
             .map(|operand| format!("{operand}"))
             .collect::<Vec<_>>()
             .join(", ");
-        write!(f, "{name}({operands})")
+        write!(f, "{name}({operands})")?;
+
+        if *eflags != Eflags::None {
+            write!(f, "[flags:{eflags}]")?;
+        }
+
+        Ok(())
     }
 }
 
@@ -279,10 +301,12 @@ pub enum Location {
     ax,
     eax,
     rax,
+    rbx,
     dx,
     edx,
     rdx,
     cl,
+    rcx,
     xmm0,
 
     // Immediate values.
@@ -309,6 +333,7 @@ pub enum Location {
     xmm1,
     xmm2,
     xmm3,
+    xmm_m8,
     xmm_m16,
     xmm_m32,
     xmm_m64,
@@ -319,6 +344,7 @@ pub enum Location {
     m16,
     m32,
     m64,
+    m128,
 }
 
 impl Location {
@@ -327,11 +353,11 @@ impl Location {
     pub fn bits(&self) -> u16 {
         use Location::*;
         match self {
-            al | cl | imm8 | r8 | rm8 | m8 => 8,
+            al | cl | imm8 | r8 | rm8 | m8 | xmm_m8 => 8,
             ax | dx | imm16 | r16 | rm16 | m16 | xmm_m16 => 16,
             eax | edx | imm32 | r32 | r32a | r32b | rm32 | m32 | xmm_m32 => 32,
-            rax | rdx | imm64 | r64 | r64a | r64b | rm64 | m64 | xmm_m64 => 64,
-            xmm1 | xmm2 | xmm3 | xmm_m128 | xmm0 => 128,
+            rax | rbx | rcx | rdx | imm64 | r64 | r64a | r64b | rm64 | m64 | xmm_m64 => 64,
+            xmm1 | xmm2 | xmm3 | xmm_m128 | xmm0 | m128 => 128,
         }
     }
 
@@ -367,15 +393,17 @@ impl Location {
     pub fn kind(&self) -> OperandKind {
         use Location::*;
         match self {
-            al | ax | eax | rax | cl | dx | edx | rdx | xmm0 => OperandKind::FixedReg(*self),
+            al | ax | eax | rax | rbx | cl | rcx | dx | edx | rdx | xmm0 => {
+                OperandKind::FixedReg(*self)
+            }
             imm8 | imm16 | imm32 | imm64 => OperandKind::Imm(*self),
             r8 | r16 | r32 | r32a | r32b | r64 | r64a | r64b | xmm1 | xmm2 | xmm3 => {
                 OperandKind::Reg(*self)
             }
-            rm8 | rm16 | rm32 | rm64 | xmm_m16 | xmm_m32 | xmm_m64 | xmm_m128 => {
+            rm8 | rm16 | rm32 | rm64 | xmm_m8 | xmm_m16 | xmm_m32 | xmm_m64 | xmm_m128 => {
                 OperandKind::RegMem(*self)
             }
-            m8 | m16 | m32 | m64 => OperandKind::Mem(*self),
+            m8 | m16 | m32 | m64 | m128 => OperandKind::Mem(*self),
         }
     }
 
@@ -387,10 +415,10 @@ impl Location {
     pub fn reg_class(&self) -> Option<RegClass> {
         use Location::*;
         match self {
-            imm8 | imm16 | imm32 | imm64 | m8 | m16 | m32 | m64 => None,
-            al | ax | eax | rax | cl | dx | edx | rdx | r8 | r16 | r32 | r32a | r32b | r64
-            | r64a | r64b | rm8 | rm16 | rm32 | rm64 => Some(RegClass::Gpr),
-            xmm1 | xmm2 | xmm3 | xmm_m16 | xmm_m32 | xmm_m64 | xmm_m128 | xmm0 => {
+            imm8 | imm16 | imm32 | imm64 | m8 | m16 | m32 | m64 | m128 => None,
+            al | ax | eax | rax | rbx | cl | rcx | dx | edx | rdx | r8 | r16 | r32 | r32a
+            | r32b | r64 | r64a | r64b | rm8 | rm16 | rm32 | rm64 => Some(RegClass::Gpr),
+            xmm1 | xmm2 | xmm3 | xmm_m8 | xmm_m16 | xmm_m32 | xmm_m64 | xmm_m128 | xmm0 => {
                 Some(RegClass::Xmm)
             }
         }
@@ -410,7 +438,9 @@ impl core::fmt::Display for Location {
             ax => write!(f, "ax"),
             eax => write!(f, "eax"),
             rax => write!(f, "rax"),
+            rbx => write!(f, "rbx"),
             cl => write!(f, "cl"),
+            rcx => write!(f, "rcx"),
             dx => write!(f, "dx"),
             edx => write!(f, "edx"),
             rdx => write!(f, "rdx"),
@@ -432,6 +462,7 @@ impl core::fmt::Display for Location {
             xmm1 => write!(f, "xmm1"),
             xmm2 => write!(f, "xmm2"),
             xmm3 => write!(f, "xmm3"),
+            xmm_m8 => write!(f, "xmm_m8"),
             xmm_m16 => write!(f, "xmm_m16"),
             xmm_m32 => write!(f, "xmm_m32"),
             xmm_m64 => write!(f, "xmm_m64"),
@@ -441,6 +472,7 @@ impl core::fmt::Display for Location {
             m16 => write!(f, "m16"),
             m32 => write!(f, "m32"),
             m64 => write!(f, "m64"),
+            m128 => write!(f, "m128"),
         }
     }
 }
@@ -550,6 +582,48 @@ impl core::fmt::Display for Extension {
             Extension::SignExtendQuad => write!(f, "sxq"),
             Extension::SignExtendLong => write!(f, "sxl"),
             Extension::SignExtendWord => write!(f, "sxw"),
+        }
+    }
+}
+
+/// Describes if an instruction uses EFLAGS, and whether it reads, writes, or
+/// reads/writes the EFLAGS register.
+/// In the future, we might want to model specific EFLAGS bits instead of the
+/// entire EFLAGS register.
+/// Some related discussion in this GitHub issue
+/// https://github.com/bytecodealliance/wasmtime/issues/10298
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Eflags {
+    None,
+    R,
+    W,
+    RW,
+}
+
+impl Eflags {
+    /// Returns whether this represents a writes to any bit in the EFLAGS
+    /// register.
+    pub fn is_write(&self) -> bool {
+        match self {
+            Eflags::None | Eflags::R => false,
+            Eflags::W | Eflags::RW => true,
+        }
+    }
+}
+
+impl Default for Eflags {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+impl core::fmt::Display for Eflags {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => write!(f, ""),
+            Self::R => write!(f, "r"),
+            Self::W => write!(f, "w"),
+            Self::RW => write!(f, "rw"),
         }
     }
 }
