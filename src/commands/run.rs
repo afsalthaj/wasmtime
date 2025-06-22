@@ -480,6 +480,7 @@ impl WasmtimeFunctionInvoke {
 
         let mut results: Vec<Val> = vec![Val::Bool(false); result_len];
         func.call_async(&mut *store, &params, &mut results).await?;
+        func.post_return_async(&mut *store).await?;
 
         Ok(results)
     }
