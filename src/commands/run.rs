@@ -16,18 +16,25 @@ use golem_rib_repl::{
 };
 use golem_wasm_ast::analysis::AnalysedType;
 use golem_wasm_ast::analysis::wit_parser::WitAnalysisContext;
-use golem_wasm_rpc::{ValueAndType, parse_value_and_type};
+use golem_wasm_rpc::{ValueAndType, parse_value_and_type, Value};
 use rib::{
     ComponentDependency, ComponentDependencyKey, ParsedFunctionName, ParsedFunctionReference,
 };
+use std::cell::RefCell;
 use std::ffi::OsString;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::vec;
+use golem_wasm_rpc::protobuf::{type_annotated_value, TypeAnnotatedValue};
+use golem_wasm_rpc::protobuf::typed_result::ResultValue;
 use uuid::Uuid;
 use wasi_common::sync::{Dir, TcpListener, WasiCtxBuilder, ambient_authority};
-use wasmtime::{Engine, Func, Module, Store, StoreLimits, Val, ValType};
+use wasmtime::component::{Component, Instance, ResourceAny};
+use wasmtime::{AsContextMut, Engine, Func, Module, Store, StoreLimits, Val, ValType};
+use wasmtime_cli_flags::CommonOptions;
 use wasmtime_wasi::p2::{IoView, WasiView};
 
 #[cfg(feature = "wasi-nn")]
@@ -54,6 +61,248 @@ fn parse_preloads(s: &str) -> Result<(String, PathBuf)> {
         bail!("must contain exactly one equals character ('=')");
     }
     Ok((parts[0].into(), parts[1].into()))
+}
+
+
+///  Runs a REPL for wasmtime
+#[derive(Parser)]
+pub struct ReplCommand {
+    #[command(flatten)]
+    #[expect(missing_docs, reason = "don't want to mess with clap doc-strings")]
+    pub run: RunCommon,
+
+    /// The WebAssembly module to run and arguments to pass to it.
+    ///
+    /// Arguments passed to the wasm module will be configured as WASI CLI
+    /// arguments unless the `--invoke` CLI argument is passed in which case
+    /// arguments will be interpreted as arguments to the function specified.
+    #[arg(value_name = "WASM", trailing_var_arg = true, required = true)]
+    pub module_and_args: Vec<OsString>,
+}
+
+/// A resource marker used for REPL
+pub struct GolemResource;
+
+impl ReplCommand {
+
+    /// Execute Repl
+    pub async fn execute_repl(mut self) -> Result<()> {
+        let path = PathBuf::from(&self.module_and_args[0]);
+
+        let wasmtime_function_invoke =
+            self.get_instance().await?;
+
+        let repl_config = RibReplConfig {
+            history_file: None,
+            dependency_manager: Arc::new(WasmtimeComponentDependencyManager {}),
+            worker_function_invoke: Arc::new(wasmtime_function_invoke),
+            printer: None,
+            component_source: Some(ComponentSource {
+                source_path: path,
+                component_name: "singleton".to_string(),
+            }),
+            prompt: None,
+            command_registry: None,
+        };
+        let mut repl = RibRepl::bootstrap(repl_config).await?;
+
+        repl.run().await;
+        Ok(())
+    }
+
+    /// Get reusable instance for REPL
+    pub async fn get_instance(&mut self) -> Result<WasmtimeFunctionInvoke> {
+        let mut config = self.run.common.config(None)?;
+        config.async_support(true);
+
+        let engine = Engine::new(&config)?;
+
+        let main = self
+            .run
+            .load_module(&engine, self.module_and_args[0].as_ref())?;
+
+        let mut linker = match &main {
+            RunTarget::Core(_) => bail!("expecting a wasm component"),
+            #[cfg(feature = "component-model")]
+            RunTarget::Component(_) => {
+                CliLinker::Component(wasmtime::component::Linker::new(&engine))
+            }
+        };
+
+        let host: Host = Host::default();
+
+        let mut store = Store::new(&engine, host);
+
+        let run_command = RunCommand {
+            run: self.run.clone(),
+            invoke: None,
+            preloads: vec![],
+            argv0: None,
+            module_and_args: self.module_and_args.clone()
+        };
+
+        run_command.populate_with_wasi(&mut linker, &mut store, &main)?;
+
+        let component = match main {
+            RunTarget::Core(_) => bail!("expecting a wasm component"),
+            #[cfg(feature = "component-model")]
+            RunTarget::Component(component) => component,
+        };
+
+        match linker {
+            CliLinker::Core(_) => bail!("expected component, found core module".to_string()),
+
+            #[cfg(feature = "component-model")]
+            CliLinker::Component(linker) => {
+                let instance = linker.instantiate_async(&mut store, &component).await?;
+
+                let session = WasmtimeFunctionInvoke {
+                    component,
+                    instance: Arc::new(instance),
+                    store: Arc::new(tokio::sync::Mutex::new(store)),
+                    common_options: self.run.common.clone()
+                };
+
+                Ok(session)
+            }
+        }
+    }
+
+    fn convert_to_type_annotated_value(type_annotated_value: TypeAnnotatedValue, store: &mut Store<Host>) -> wasmtime::component::Val {
+        match type_annotated_value.type_annotated_value.unwrap() {
+            type_annotated_value::TypeAnnotatedValue::Bool(bool) => {
+                wasmtime::component::Val::Bool(bool)
+            }
+            type_annotated_value::TypeAnnotatedValue::U8(u8) => {
+                wasmtime::component::Val::U8(u8 as u8)
+            }
+            type_annotated_value::TypeAnnotatedValue::U16(u16) => {
+                wasmtime::component::Val::U16(u16 as u16)
+            }
+            type_annotated_value::TypeAnnotatedValue::U32(u32) => {
+                wasmtime::component::Val::U32(u32)
+            }
+            type_annotated_value::TypeAnnotatedValue::U64(u64) => {
+                wasmtime::component::Val::U64(u64)
+            }
+            type_annotated_value::TypeAnnotatedValue::S8(s8) => {
+                wasmtime::component::Val::S8(s8 as i8)
+            }
+            type_annotated_value::TypeAnnotatedValue::S16(s16) => {
+                wasmtime::component::Val::S16(s16 as i16)
+            }
+            type_annotated_value::TypeAnnotatedValue::S32(s32) => {
+                wasmtime::component::Val::S32(s32)
+            }
+            type_annotated_value::TypeAnnotatedValue::S64(s64) => {
+                wasmtime::component::Val::S64(s64)
+            }
+            type_annotated_value::TypeAnnotatedValue::F32(f32) => {
+                wasmtime::component::Val::Float32(f32)
+            }
+            type_annotated_value::TypeAnnotatedValue::F64(f64) => {
+                wasmtime::component::Val::Float64(f64)
+            }
+            type_annotated_value::TypeAnnotatedValue::Char(char) => {
+                wasmtime::component::Val::Char(std::char::from_u32(char as u32).unwrap())
+            }
+            type_annotated_value::TypeAnnotatedValue::Str(string) => {
+                wasmtime::component::Val::String(string)
+            }
+            type_annotated_value::TypeAnnotatedValue::List(list) => {
+                let values: Vec<wasmtime::component::Val> = list
+                    .values
+                    .into_iter()
+                    .map(|x| Self::convert_to_type_annotated_value(x, store))
+                    .collect();
+                wasmtime::component::Val::List(values)
+            }
+            type_annotated_value::TypeAnnotatedValue::Tuple(tuple) => {
+                let values: Vec<wasmtime::component::Val> = tuple
+                    .value
+                    .into_iter()
+                    .map(|x| Self::convert_to_type_annotated_value(x, store))
+                    .collect();
+                wasmtime::component::Val::Tuple(values)
+            }
+            type_annotated_value::TypeAnnotatedValue::Record(record) => {
+                let values =
+                    record.value.iter().map(|x| (x.name.clone(), Self::convert_to_type_annotated_value(x.value.clone().unwrap(), store))).collect::<Vec<_>>();
+
+                wasmtime::component::Val::Record(values)
+            }
+            type_annotated_value::TypeAnnotatedValue::Variant(typed_variant) => {
+                let name = typed_variant.case_name;
+                let value = typed_variant.case_value.map(|x| {
+                   Box::new(Self::convert_to_type_annotated_value(x.deref().clone(), store))
+                });
+                wasmtime::component::Val::Variant(name, value)
+            }
+            type_annotated_value::TypeAnnotatedValue::Enum(enum_cases) => {
+                wasmtime::component::Val::Enum(enum_cases.value)
+            }
+            type_annotated_value::TypeAnnotatedValue::Flags(typed_flags) => {
+                wasmtime::component::Val::Flags(typed_flags.values)
+            }
+            type_annotated_value::TypeAnnotatedValue::Option(typed_option) => {
+
+                if let Some(value) = typed_option.value {
+                    wasmtime::component::Val::Option(
+                        Some(Box::new(Self::convert_to_type_annotated_value(value.deref().clone(), store))),
+                    )
+                } else {
+                    wasmtime::component::Val::Option(None)
+                }
+            }
+            type_annotated_value::TypeAnnotatedValue::Result(typed_result) => {
+                let ok = typed_result.result_value;
+
+                match ok {
+                    None => {
+                        wasmtime::component::Val::Result(Ok(None))
+                    }
+                    Some(value) => {
+                        match value {
+                            ResultValue::OkValue(type_annotated_value ) => {
+                                let val =
+                                    Self::convert_to_type_annotated_value(type_annotated_value.deref().clone(), store);
+
+                                wasmtime::component::Val::Result(Ok(Some(Box::new(val))))
+                            }
+
+                            ResultValue::ErrorValue(type_annotated_value) => {
+                                let val =
+                                    Self::convert_to_type_annotated_value(type_annotated_value.deref().clone(), store);
+
+                                wasmtime::component::Val::Result(Err(Some(Box::new(val))))
+                            }
+                        }
+                    }
+                }
+            }
+            type_annotated_value::TypeAnnotatedValue::Handle(typed_handle) => {
+                let x = typed_handle.resource_id;
+
+                let typed =
+                    wasmtime::component::Resource::<GolemResource>::new_borrow(x as u32);
+
+                let any = ResourceAny::try_from_resource(typed, store)
+                    .expect("failed to convert to ResourceAny");
+
+                wasmtime::component::Val::Resource(any)
+            }
+        }
+    }
+
+    fn convert_to_wasm_rpc_value(value_and_type: ValueAndType, store: &mut Store<Host>) -> wasmtime::component::Val {
+
+        // Unwrapping it as this is a real bug in the dependent library
+        let type_annotated_value =
+            TypeAnnotatedValue::try_from(value_and_type).unwrap();
+
+        Self::convert_to_type_annotated_value(type_annotated_value, store)
+    }
+
 }
 
 /// Runs a WebAssembly module
@@ -145,8 +394,95 @@ impl RibDependencyManager for WasmtimeComponentDependencyManager {
     }
 }
 
+struct WasmtimeReplSession {
+    common_options: CommonOptions,
+    instance: Instance,
+    store: Store<Host>,
+    component: Component,
+}
+
 struct WasmtimeFunctionInvoke {
-    run_command: RunCommand,
+    common_options: CommonOptions,
+    instance: Arc<Instance>,
+    store: Arc<tokio::sync::Mutex<Store<Host>>>,
+    component: Component,
+}
+
+impl WasmtimeFunctionInvoke {
+    pub async fn invoke(&self, function_name: &str, args: Vec<ValueAndType>, return_type: Option<AnalysedType>) -> Result<Option<ValueAndType>> {
+        let result =
+            self.invoke_function_in_instance(function_name, args).await?;
+
+        let result = return_type
+            .map(|typ| {
+                let result = result[0].to_wave()?;
+                parse_value_and_type(&typ, &result).map_err(|e| anyhow!(e))
+            })
+            .transpose()?;
+
+        Ok(result)
+    }
+
+    #[cfg(feature = "component-model")]
+    async fn invoke_function_in_instance(
+        &self,
+        invoke: &str,
+        args: Vec<ValueAndType>,
+    ) -> Result<Vec<wasmtime::component::Val>> {
+        use wasmtime::component::{
+            Val, types::ComponentItem, wasm_wave::untyped::UntypedFuncCall,
+            wasm_wave::wasm::WasmFunc,
+        };
+
+        let mut store = self.store.lock().await;
+        let component = &self.component;
+
+        let parsed_function_name = ParsedFunctionName::parse(invoke).unwrap();
+
+        let matches =
+            RunCommand::search_component(store.engine(), component.component_type(), &parsed_function_name.function.function_name());
+
+        match matches.len() {
+            0 => bail!("No export named `{invoke}` in component."),
+            1 => {}
+            _ => bail!(
+                "Multiple exports named `{invoke}`: {matches:?}. FIXME: support some way to disambiguate names"
+            ),
+        };
+        let (params, result_len, export) = match &matches[0] {
+            (names, ComponentItem::ComponentFunc(func)) => {
+                let params =
+                    args.iter().map(|x| ReplCommand::convert_to_wasm_rpc_value(x.clone(), &mut *store)).collect::<Vec<_>>();
+
+                let mut export = None;
+                for name in names {
+                    let ix = component
+                        .get_export_index(export.as_ref(), name)
+                        .expect("export exists");
+                    export = Some(ix);
+                }
+                (
+                    params,
+                    func.results().len(),
+                    export.expect("export has at least one name"),
+                )
+            }
+            (names, ty) => {
+                bail!("Cannot invoke export {names:?}: expected ComponentFunc, got type {ty:?}");
+            }
+        };
+
+        let instance = &self.instance;
+
+        let func = instance
+            .get_func(&mut *store, export)
+            .expect("found export index");
+
+        let mut results: Vec<Val> = vec![Val::Bool(false); result_len];
+        func.call_async(&mut *store, &params, &mut results).await?;
+
+        Ok(results)
+    }
 }
 
 #[async_trait]
@@ -160,38 +496,11 @@ impl WorkerFunctionInvoke for WasmtimeFunctionInvoke {
         args: Vec<ValueAndType>,
         return_type: Option<AnalysedType>,
     ) -> anyhow::Result<Option<ValueAndType>> {
-        let run_command = self.run_command.clone();
-        run_command
-            .invoke_component_function(function_name, args, return_type)
-            .await
+        self.invoke(function_name, args, return_type).await
     }
 }
 
 impl RunCommand {
-    /// Execute Repl
-    pub async fn execute_repl(self) -> Result<()> {
-        let path = PathBuf::from(&self.module_and_args[0]);
-
-        let invoke = WasmtimeFunctionInvoke { run_command: self };
-
-        let repl_config = RibReplConfig {
-            history_file: None,
-            dependency_manager: Arc::new(WasmtimeComponentDependencyManager {}),
-            worker_function_invoke: Arc::new(invoke),
-            printer: None,
-            component_source: Some(ComponentSource {
-                source_path: path,
-                component_name: "singleton".to_string(),
-            }),
-            prompt: None,
-            command_registry: None,
-        };
-        let mut repl = RibRepl::bootstrap(repl_config).await?;
-
-        repl.run().await;
-        Ok(())
-    }
-
     /// Invoke Component Function
     pub async fn invoke_component_function(
         mut self,
@@ -217,7 +526,7 @@ impl RunCommand {
             }
         };
 
-        let host = Host::default();
+        let host: Host = Host::default();
 
         let mut store = Store::new(&engine, host);
         self.populate_with_wasi(&mut linker, &mut store, &main)?;
@@ -836,7 +1145,9 @@ impl RunCommand {
 
         collect_exports(engine, CItem::Component(component), Vec::new())
             .into_iter()
-            .filter(|(names, _item)| names.last().expect("at least one name") == name)
+            .filter(|(names, item)| {
+                names.last().expect("at least one name") == name
+            })
             .collect()
     }
 

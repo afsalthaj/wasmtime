@@ -56,7 +56,7 @@ fn version() -> &'static str {
 enum Subcommand {
     /// Runs a wasmtime REPL
     #[cfg(feature = "run")]
-    Repl(wasmtime_cli::commands::RunCommand),
+    Repl(wasmtime_cli::commands::ReplCommand),
     /// Runs a WebAssembly module
     #[cfg(feature = "run")]
     Run(wasmtime_cli::commands::RunCommand),
