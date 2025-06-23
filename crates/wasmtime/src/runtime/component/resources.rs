@@ -839,6 +839,8 @@ unsafe impl<T: 'static> ComponentType for Resource<T> {
             InterfaceType::Own(t) | InterfaceType::Borrow(t) => *t,
             other => bail!("expected `own` or `borrow`, found `{}`", desc(other)),
         };
+
+
         match types.resource_type(resource).kind {
             ResourceTypeKind::Host(id) if TypeId::of::<T>() == id => {}
             _ => bail!("resource type mismatch"),

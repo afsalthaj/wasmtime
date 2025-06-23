@@ -28,6 +28,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::vec;
+use golem_wasm_ast::analysis::analysed_type::str;
 use golem_wasm_rpc::protobuf::{type_annotated_value, TypeAnnotatedValue};
 use golem_wasm_rpc::protobuf::typed_result::ResultValue;
 use uuid::Uuid;
@@ -410,13 +411,39 @@ struct WasmtimeFunctionInvoke {
 
 impl WasmtimeFunctionInvoke {
     pub async fn invoke(&self, function_name: &str, args: Vec<ValueAndType>, return_type: Option<AnalysedType>) -> Result<Option<ValueAndType>> {
+
+        let mut store = self.store.lock().await;
+
+        dbg!("acquired lock of store");
+
         let result =
-            self.invoke_function_in_instance(function_name, args).await?;
+            self.invoke_function_in_instance(function_name, &mut store, args).await?;
 
         let result = return_type
             .map(|typ| {
-                let result = result[0].to_wave()?;
-                parse_value_and_type(&typ, &result).map_err(|e| anyhow!(e))
+                let result_val = result[0].clone();
+
+                match result_val {
+                    wasmtime::component::Val::Resource(resource_any) => {
+                        dbg!("starting");
+                        let id = resource_any.try_into_resource::<GolemResource>(&mut *store)?;
+                        dbg!("ending");
+                        let resource_id = id.rep();
+
+                        dbg!(resource_id);
+
+                       let value = Value::Handle {
+                           uri: "/dummy".to_string(),
+                           resource_id: resource_id as u64,
+                       };
+
+                       Ok(ValueAndType::new(value, typ.clone()))
+                    }
+                    _ => {
+                        let result = result_val.to_wave()?;
+                        parse_value_and_type(&typ, &result).map_err(|e| anyhow!(e))
+                    }
+                }
             })
             .transpose()?;
 
@@ -427,63 +454,88 @@ impl WasmtimeFunctionInvoke {
     async fn invoke_function_in_instance(
         &self,
         invoke: &str,
+        mut store: &mut Store<Host>,
         args: Vec<ValueAndType>,
     ) -> Result<Vec<wasmtime::component::Val>> {
-        use wasmtime::component::{
-            Val, types::ComponentItem, wasm_wave::untyped::UntypedFuncCall,
-            wasm_wave::wasm::WasmFunc,
-        };
-
-        let mut store = self.store.lock().await;
-        let component = &self.component;
+        use wasmtime::component::{Val};
 
         let parsed_function_name = ParsedFunctionName::parse(invoke).unwrap();
 
-        let matches =
-            RunCommand::search_component(store.engine(), component.component_type(), &parsed_function_name.function.function_name());
+        let func = self.find_function(&mut store, &parsed_function_name)?;
 
-        match matches.len() {
-            0 => bail!("No export named `{invoke}` in component."),
-            1 => {}
-            _ => bail!(
-                "Multiple exports named `{invoke}`: {matches:?}. FIXME: support some way to disambiguate names"
-            ),
-        };
-        let (params, result_len, export) = match &matches[0] {
-            (names, ComponentItem::ComponentFunc(func)) => {
-                let params =
-                    args.iter().map(|x| ReplCommand::convert_to_wasm_rpc_value(x.clone(), &mut *store)).collect::<Vec<_>>();
+        let params =
+            args.iter().map(|x| ReplCommand::convert_to_wasm_rpc_value(x.clone(), &mut store)).collect::<Vec<_>>();
 
-                let mut export = None;
-                for name in names {
-                    let ix = component
-                        .get_export_index(export.as_ref(), name)
-                        .expect("export exists");
-                    export = Some(ix);
-                }
-                (
-                    params,
-                    func.results().len(),
-                    export.expect("export has at least one name"),
-                )
-            }
-            (names, ty) => {
-                bail!("Cannot invoke export {names:?}: expected ComponentFunc, got type {ty:?}");
-            }
-        };
 
-        let instance = &self.instance;
-
-        let func = instance
-            .get_func(&mut *store, export)
-            .expect("found export index");
-
-        let mut results: Vec<Val> = vec![Val::Bool(false); result_len];
+        let mut results: Vec<Val> = vec![Val::Bool(false); 1];
         func.call_async(&mut *store, &params, &mut results).await?;
         func.post_return_async(&mut *store).await?;
 
         Ok(results)
     }
+
+    fn find_function(
+        &self,
+        mut store: &mut Store<Host>,
+        parsed_function_name: &ParsedFunctionName,
+    ) -> Result<wasmtime::component::Func> {
+
+        match &parsed_function_name.site().interface_name() {
+            Some(interface_name) => {
+                let (_, exported_instance_idx) = self.instance
+                    .get_export(&mut store, None, interface_name)
+                    .ok_or(anyhow!(
+                        "could not load exports for interface {}",
+                        interface_name
+                    ))?;
+
+                let func = self.instance
+                    .get_export(
+                        &mut store,
+                        Some(&exported_instance_idx),
+                        &parsed_function_name.function().function_name(),
+                    )
+                    .and_then(|(_, idx)| self.instance.get_func(&mut store, idx));
+
+                match func {
+                    Some(func) => Ok(func),
+                    None => match parsed_function_name.method_as_static() {
+                        None => Err(anyhow!(
+                            "could not load function {} for interface {}",
+                            &parsed_function_name.function().function_name(),
+                            interface_name
+                        )),
+                        Some(parsed_static) => {
+                            let result = self
+                                .instance
+                                .get_export(
+                                    &mut store,
+                                    Some(&exported_instance_idx),
+                                    &parsed_static.function().function_name(),
+                                )
+                                .and_then(|(_, idx)| self.instance.get_func(store, idx))
+                                .ok_or(anyhow!(
+                                "could not load function {} or {} for interface {}",
+                                &parsed_function_name.function().function_name(),
+                                &parsed_static.function().function_name(),
+                                interface_name
+                            ))?;
+
+                            Ok(result)
+
+                        }
+                    },
+                }
+            }
+            None => self.instance
+                .get_func(store, parsed_function_name.function().function_name())
+                .ok_or(anyhow!(
+                    "could not load function {}",
+                    &parsed_function_name.function().function_name()
+                ))
+        }
+    }
+
 }
 
 #[async_trait]
