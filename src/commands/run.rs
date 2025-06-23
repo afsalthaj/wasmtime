@@ -15,8 +15,11 @@ use golem_rib_repl::{
     WorkerFunctionInvoke,
 };
 use golem_wasm_ast::analysis::AnalysedType;
+use golem_wasm_ast::analysis::analysed_type::str;
 use golem_wasm_ast::analysis::wit_parser::WitAnalysisContext;
-use golem_wasm_rpc::{ValueAndType, parse_value_and_type, Value};
+use golem_wasm_rpc::protobuf::typed_result::ResultValue;
+use golem_wasm_rpc::protobuf::{TypeAnnotatedValue, type_annotated_value};
+use golem_wasm_rpc::{Value, ValueAndType, parse_value_and_type};
 use rib::{
     ComponentDependency, ComponentDependencyKey, ParsedFunctionName, ParsedFunctionReference,
 };
@@ -28,9 +31,6 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::vec;
-use golem_wasm_ast::analysis::analysed_type::str;
-use golem_wasm_rpc::protobuf::{type_annotated_value, TypeAnnotatedValue};
-use golem_wasm_rpc::protobuf::typed_result::ResultValue;
 use uuid::Uuid;
 use wasi_common::sync::{Dir, TcpListener, WasiCtxBuilder, ambient_authority};
 use wasmtime::component::{Component, Instance, ResourceAny};
@@ -64,7 +64,6 @@ fn parse_preloads(s: &str) -> Result<(String, PathBuf)> {
     Ok((parts[0].into(), parts[1].into()))
 }
 
-
 ///  Runs a REPL for wasmtime
 #[derive(Parser)]
 pub struct ReplCommand {
@@ -85,13 +84,11 @@ pub struct ReplCommand {
 pub struct GolemResource;
 
 impl ReplCommand {
-
     /// Execute Repl
     pub async fn execute_repl(mut self) -> Result<()> {
         let path = PathBuf::from(&self.module_and_args[0]);
 
-        let wasmtime_function_invoke =
-            self.get_instance().await?;
+        let wasmtime_function_invoke = self.get_instance().await?;
 
         let repl_config = RibReplConfig {
             history_file: None,
@@ -139,7 +136,7 @@ impl ReplCommand {
             invoke: None,
             preloads: vec![],
             argv0: None,
-            module_and_args: self.module_and_args.clone()
+            module_and_args: self.module_and_args.clone(),
         };
 
         run_command.populate_with_wasi(&mut linker, &mut store, &main)?;
@@ -161,7 +158,7 @@ impl ReplCommand {
                     component,
                     instance: Arc::new(instance),
                     store: Arc::new(tokio::sync::Mutex::new(store)),
-                    common_options: self.run.common.clone()
+                    common_options: self.run.common.clone(),
                 };
 
                 Ok(session)
@@ -169,7 +166,10 @@ impl ReplCommand {
         }
     }
 
-    fn convert_to_type_annotated_value(type_annotated_value: TypeAnnotatedValue, store: &mut Store<Host>) -> wasmtime::component::Val {
+    fn convert_to_type_annotated_value(
+        type_annotated_value: TypeAnnotatedValue,
+        store: &mut Store<Host>,
+    ) -> wasmtime::component::Val {
         match type_annotated_value.type_annotated_value.unwrap() {
             type_annotated_value::TypeAnnotatedValue::Bool(bool) => {
                 wasmtime::component::Val::Bool(bool)
@@ -227,15 +227,26 @@ impl ReplCommand {
                 wasmtime::component::Val::Tuple(values)
             }
             type_annotated_value::TypeAnnotatedValue::Record(record) => {
-                let values =
-                    record.value.iter().map(|x| (x.name.clone(), Self::convert_to_type_annotated_value(x.value.clone().unwrap(), store))).collect::<Vec<_>>();
+                let values = record
+                    .value
+                    .iter()
+                    .map(|x| {
+                        (
+                            x.name.clone(),
+                            Self::convert_to_type_annotated_value(x.value.clone().unwrap(), store),
+                        )
+                    })
+                    .collect::<Vec<_>>();
 
                 wasmtime::component::Val::Record(values)
             }
             type_annotated_value::TypeAnnotatedValue::Variant(typed_variant) => {
                 let name = typed_variant.case_name;
                 let value = typed_variant.case_value.map(|x| {
-                   Box::new(Self::convert_to_type_annotated_value(x.deref().clone(), store))
+                    Box::new(Self::convert_to_type_annotated_value(
+                        x.deref().clone(),
+                        store,
+                    ))
                 });
                 wasmtime::component::Val::Variant(name, value)
             }
@@ -246,11 +257,10 @@ impl ReplCommand {
                 wasmtime::component::Val::Flags(typed_flags.values)
             }
             type_annotated_value::TypeAnnotatedValue::Option(typed_option) => {
-
                 if let Some(value) = typed_option.value {
-                    wasmtime::component::Val::Option(
-                        Some(Box::new(Self::convert_to_type_annotated_value(value.deref().clone(), store))),
-                    )
+                    wasmtime::component::Val::Option(Some(Box::new(
+                        Self::convert_to_type_annotated_value(value.deref().clone(), store),
+                    )))
                 } else {
                     wasmtime::component::Val::Option(None)
                 }
@@ -259,33 +269,32 @@ impl ReplCommand {
                 let ok = typed_result.result_value;
 
                 match ok {
-                    None => {
-                        wasmtime::component::Val::Result(Ok(None))
-                    }
-                    Some(value) => {
-                        match value {
-                            ResultValue::OkValue(type_annotated_value ) => {
-                                let val =
-                                    Self::convert_to_type_annotated_value(type_annotated_value.deref().clone(), store);
+                    None => wasmtime::component::Val::Result(Ok(None)),
+                    Some(value) => match value {
+                        ResultValue::OkValue(type_annotated_value) => {
+                            let val = Self::convert_to_type_annotated_value(
+                                type_annotated_value.deref().clone(),
+                                store,
+                            );
 
-                                wasmtime::component::Val::Result(Ok(Some(Box::new(val))))
-                            }
-
-                            ResultValue::ErrorValue(type_annotated_value) => {
-                                let val =
-                                    Self::convert_to_type_annotated_value(type_annotated_value.deref().clone(), store);
-
-                                wasmtime::component::Val::Result(Err(Some(Box::new(val))))
-                            }
+                            wasmtime::component::Val::Result(Ok(Some(Box::new(val))))
                         }
-                    }
+
+                        ResultValue::ErrorValue(type_annotated_value) => {
+                            let val = Self::convert_to_type_annotated_value(
+                                type_annotated_value.deref().clone(),
+                                store,
+                            );
+
+                            wasmtime::component::Val::Result(Err(Some(Box::new(val))))
+                        }
+                    },
                 }
             }
             type_annotated_value::TypeAnnotatedValue::Handle(typed_handle) => {
                 let x = typed_handle.resource_id;
 
-                let typed =
-                    wasmtime::component::Resource::<GolemResource>::new_borrow(x as u32);
+                let typed = wasmtime::component::Resource::<GolemResource>::new_borrow(x as u32);
 
                 let any = ResourceAny::try_from_resource(typed, store)
                     .expect("failed to convert to ResourceAny");
@@ -295,15 +304,15 @@ impl ReplCommand {
         }
     }
 
-    fn convert_to_wasm_rpc_value(value_and_type: ValueAndType, store: &mut Store<Host>) -> wasmtime::component::Val {
-
+    fn convert_to_wasm_rpc_value(
+        value_and_type: ValueAndType,
+        store: &mut Store<Host>,
+    ) -> wasmtime::component::Val {
         // Unwrapping it as this is a real bug in the dependent library
-        let type_annotated_value =
-            TypeAnnotatedValue::try_from(value_and_type).unwrap();
+        let type_annotated_value = TypeAnnotatedValue::try_from(value_and_type).unwrap();
 
         Self::convert_to_type_annotated_value(type_annotated_value, store)
     }
-
 }
 
 /// Runs a WebAssembly module
@@ -410,14 +419,19 @@ struct WasmtimeFunctionInvoke {
 }
 
 impl WasmtimeFunctionInvoke {
-    pub async fn invoke(&self, function_name: &str, args: Vec<ValueAndType>, return_type: Option<AnalysedType>) -> Result<Option<ValueAndType>> {
-
+    pub async fn invoke(
+        &self,
+        function_name: &str,
+        args: Vec<ValueAndType>,
+        return_type: Option<AnalysedType>,
+    ) -> Result<Option<ValueAndType>> {
         let mut store = self.store.lock().await;
 
         dbg!("acquired lock of store");
 
-        let result =
-            self.invoke_function_in_instance(function_name, &mut store, args).await?;
+        let result = self
+            .invoke_function_in_instance(function_name, &mut store, args)
+            .await?;
 
         let result = return_type
             .map(|typ| {
@@ -425,19 +439,15 @@ impl WasmtimeFunctionInvoke {
 
                 match result_val {
                     wasmtime::component::Val::Resource(resource_any) => {
-                        dbg!("starting");
                         let id = resource_any.try_into_resource::<GolemResource>(&mut *store)?;
-                        dbg!("ending");
                         let resource_id = id.rep();
 
-                        dbg!(resource_id);
+                        let value = Value::Handle {
+                            uri: "/dummy".to_string(),
+                            resource_id: resource_id as u64,
+                        };
 
-                       let value = Value::Handle {
-                           uri: "/dummy".to_string(),
-                           resource_id: resource_id as u64,
-                       };
-
-                       Ok(ValueAndType::new(value, typ.clone()))
+                        Ok(ValueAndType::new(value, typ.clone()))
                     }
                     _ => {
                         let result = result_val.to_wave()?;
@@ -457,15 +467,16 @@ impl WasmtimeFunctionInvoke {
         mut store: &mut Store<Host>,
         args: Vec<ValueAndType>,
     ) -> Result<Vec<wasmtime::component::Val>> {
-        use wasmtime::component::{Val};
+        use wasmtime::component::Val;
 
         let parsed_function_name = ParsedFunctionName::parse(invoke).unwrap();
 
         let func = self.find_function(&mut store, &parsed_function_name)?;
 
-        let params =
-            args.iter().map(|x| ReplCommand::convert_to_wasm_rpc_value(x.clone(), &mut store)).collect::<Vec<_>>();
-
+        let params = args
+            .iter()
+            .map(|x| ReplCommand::convert_to_wasm_rpc_value(x.clone(), &mut store))
+            .collect::<Vec<_>>();
 
         let mut results: Vec<Val> = vec![Val::Bool(false); 1];
         func.call_async(&mut *store, &params, &mut results).await?;
@@ -479,17 +490,18 @@ impl WasmtimeFunctionInvoke {
         mut store: &mut Store<Host>,
         parsed_function_name: &ParsedFunctionName,
     ) -> Result<wasmtime::component::Func> {
-
         match &parsed_function_name.site().interface_name() {
             Some(interface_name) => {
-                let (_, exported_instance_idx) = self.instance
+                let (_, exported_instance_idx) = self
+                    .instance
                     .get_export(&mut store, None, interface_name)
                     .ok_or(anyhow!(
                         "could not load exports for interface {}",
                         interface_name
                     ))?;
 
-                let func = self.instance
+                let func = self
+                    .instance
                     .get_export(
                         &mut store,
                         Some(&exported_instance_idx),
@@ -515,27 +527,26 @@ impl WasmtimeFunctionInvoke {
                                 )
                                 .and_then(|(_, idx)| self.instance.get_func(store, idx))
                                 .ok_or(anyhow!(
-                                "could not load function {} or {} for interface {}",
-                                &parsed_function_name.function().function_name(),
-                                &parsed_static.function().function_name(),
-                                interface_name
-                            ))?;
+                                    "could not load function {} or {} for interface {}",
+                                    &parsed_function_name.function().function_name(),
+                                    &parsed_static.function().function_name(),
+                                    interface_name
+                                ))?;
 
                             Ok(result)
-
                         }
                     },
                 }
             }
-            None => self.instance
+            None => self
+                .instance
                 .get_func(store, parsed_function_name.function().function_name())
                 .ok_or(anyhow!(
                     "could not load function {}",
                     &parsed_function_name.function().function_name()
-                ))
+                )),
         }
     }
-
 }
 
 #[async_trait]
@@ -1198,9 +1209,7 @@ impl RunCommand {
 
         collect_exports(engine, CItem::Component(component), Vec::new())
             .into_iter()
-            .filter(|(names, item)| {
-                names.last().expect("at least one name") == name
-            })
+            .filter(|(names, item)| names.last().expect("at least one name") == name)
             .collect()
     }
 
