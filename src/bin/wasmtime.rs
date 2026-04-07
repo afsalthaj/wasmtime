@@ -92,6 +92,10 @@ enum Subcommand {
 
     #[cfg(feature = "wizer")]
     Wizer(wasmtime_cli::commands::WizerCommand),
+
+    /// Interactive Rib REPL for a WebAssembly component
+    #[cfg(feature = "rib")]
+    Rib(wasmtime_cli::commands::RibCommand),
 }
 
 impl Wasmtime {
@@ -132,6 +136,9 @@ impl Wasmtime {
 
             #[cfg(feature = "wizer")]
             Subcommand::Wizer(c) => c.execute(),
+
+            #[cfg(feature = "rib")]
+            Subcommand::Rib(c) => c.execute(),
         }
     }
 }

@@ -42,7 +42,7 @@ fn parse_preloads(s: &str) -> Result<(String, PathBuf)> {
 }
 
 /// Runs a WebAssembly module
-#[derive(Parser)]
+#[derive(Parser, Clone)]
 pub struct RunCommand {
     #[command(flatten)]
     #[expect(missing_docs, reason = "don't want to mess with clap doc-strings")]
