@@ -8,6 +8,7 @@ use super::run::{CliLinker, Host, Preloads, RunCommand};
 use crate::common::{RunCommon, RunTarget};
 use async_trait::async_trait;
 use clap::Parser;
+use rib_repl::rib as rib;
 use rib::analysis::{
     AnalysedExport, AnalysedFunction, AnalysedFunctionParameter, AnalysedFunctionResult,
     AnalysedInstance, AnalysedResourceId, AnalysedResourceMode, AnalysedType, NameOptionTypePair,
@@ -32,15 +33,11 @@ use wasmtime::component::{Component, ComponentExportIndex, Func, Instance, Val};
 use wasmtime::{Engine, Result, Store};
 
 /// Start an interactive Rib REPL against a WebAssembly component.
-#[derive(Parser, Clone)]
+#[derive(Parser)]
 pub struct RibCommand {
     #[command(flatten)]
     #[expect(missing_docs, reason = "reuse run command flags")]
     pub run: RunCommon,
-
-    /// Logical component name in Rib (default: file stem).
-    #[arg(long = "rib-name")]
-    pub name: Option<String>,
 
     /// WebAssembly component file (`.wasm`).
     #[arg(value_name = "WASM")]
@@ -56,28 +53,33 @@ impl RibCommand {
             .build()
             .map_err(|e| wasmtime::Error::msg(format!("tokio runtime: {e}")))?;
 
-        runtime.block_on(async {
-            self.run.common.init_logging()?;
+        self.run.common.init_logging()?;
 
-            let component_name = self.name.clone().unwrap_or_else(|| {
-                self.component
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("component")
-                    .to_string()
-            });
+        let RibCommand {
+            run,
+            component: wasm_path,
+        } = self;
 
+        let component_name = wasm_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("component")
+            .to_string();
+
+        runtime.block_on(async move {
             let mut run_cmd = RunCommand {
-                run: self.run.clone(),
+                run,
                 invoke: None,
                 preloads: Preloads::default(),
                 argv0: None,
                 module_bytes: None,
-                module_and_args: vec![self.component.as_os_str().into()],
+                module_and_args: vec![wasm_path.as_os_str().into()],
             };
 
             let engine = run_cmd.new_engine()?;
-            let main = run_cmd.run.load_module(&engine, &self.component, None)?;
+            let main = run_cmd
+                .run
+                .load_module(&engine, &wasm_path, None)?;
             let (mut store, linker) = run_cmd.new_store_and_linker(&engine, &main)?;
             let RunTarget::Component(component) = main else {
                 return Err(wasmtime::Error::msg(
@@ -118,7 +120,7 @@ impl RibCommand {
                 printer: None,
                 component_source: Some(ComponentSource {
                     component_name,
-                    source_path: self.component.clone(),
+                    source_path: wasm_path.clone(),
                 }),
                 prompt: None,
                 command_registry: None,

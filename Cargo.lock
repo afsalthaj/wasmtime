@@ -5077,7 +5077,6 @@ dependencies = [
  "pulley-interpreter",
  "rand 0.9.2",
  "rayon",
- "rib-core",
  "rib-repl",
  "rustix 1.0.8",
  "serde",

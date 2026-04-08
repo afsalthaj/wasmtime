@@ -19,7 +19,6 @@ use wasmtime::component::Component;
 /// future.
 pub const P3_DEFAULT: bool = cfg!(feature = "component-model-async") && false;
 
-#[derive(Clone)]
 pub enum RunTarget {
     Core(Module),
 
@@ -46,7 +45,7 @@ impl RunTarget {
 }
 
 /// Common command line arguments for run commands.
-#[derive(Parser, Clone)]
+#[derive(Parser)]
 pub struct RunCommon {
     #[command(flatten)]
     pub common: CommonOptions,

@@ -92,7 +92,6 @@ http-body-util = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 
 # Optional Rib language REPL for components (`wasmtime rib`, feature `rib`).
-rib-core = { path = "../rib/rib-core", optional = true }
 rib-repl = { path = "../rib/rib-repl", optional = true }
 
 [target.'cfg(unix)'.dependencies]
@@ -627,7 +626,6 @@ wizer = [
 rib = [
   "component-model",
   "run",
-  "dep:rib-core",
   "dep:rib-repl",
 ]
 
