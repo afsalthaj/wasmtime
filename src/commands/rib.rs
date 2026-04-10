@@ -8,21 +8,21 @@ use super::run::{CliLinker, Host, Preloads, RunCommand};
 use crate::common::{RunCommon, RunTarget};
 use async_trait::async_trait;
 use clap::Parser;
-use rib_repl::rib as rib;
 use rib::wit_type::{
-    NameOptionTypePair, NameTypePair, TypeBool, TypeChr, TypeEnum, TypeF32, TypeF64, TypeFlags,
-    TypeHandle, TypeList, TypeOption, TypeRecord, TypeResult, TypeS16, TypeS32, TypeS64, TypeS8,
-    TypeStr, TypeTuple, TypeU16, TypeU32, TypeU64, TypeU8, TypeVariant, WitExport, WitFunction,
-    WitFunctionParameter, WitFunctionResult, WitInterface, WitType, AnalysedResourceId,
-    AnalysedResourceMode,
+    AnalysedResourceId, AnalysedResourceMode, NameOptionTypePair, NameTypePair, TypeBool, TypeChr,
+    TypeEnum, TypeF32, TypeF64, TypeFlags, TypeHandle, TypeList, TypeOption, TypeRecord,
+    TypeResult, TypeS8, TypeS16, TypeS32, TypeS64, TypeStr, TypeTuple, TypeU8, TypeU16, TypeU32,
+    TypeU64, TypeVariant, WitExport, WitFunction, WitFunctionParameter, WitFunctionResult,
+    WitInterface, WitType,
 };
 use rib::{
     ComponentDependency, ComponentDependencyKey, ParsedFunctionName, ParsedFunctionSite, Value,
     ValueAndType,
 };
+use rib_repl::rib;
 use rib_repl::{
-    self as rib_repl_crate, anyhow::Context as _, ComponentFunctionInvoke, ComponentSource,
-    ReplComponentBundle, RibDependencyManager, RibRepl, RibReplConfig,
+    self as rib_repl_crate, ComponentFunctionInvoke, ComponentSource, ReplComponentBundle,
+    RibDependencyManager, RibRepl, RibReplConfig, anyhow::Context as _,
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -77,9 +77,7 @@ impl RibCommand {
             };
 
             let engine = run_cmd.new_engine()?;
-            let main = run_cmd
-                .run
-                .load_module(&engine, &wasm_path, None)?;
+            let main = run_cmd.run.load_module(&engine, &wasm_path, None)?;
             let (mut store, linker) = run_cmd.new_store_and_linker(&engine, &main)?;
             let RunTarget::Component(component) = main else {
                 return Err(wasmtime::Error::msg(
@@ -192,7 +190,9 @@ impl ComponentFunctionInvoke for WasmtimeWorkerInvoke {
         return_type: Option<WitType>,
     ) -> rib_repl_crate::anyhow::Result<Option<ValueAndType>> {
         if component_id != self.component_id {
-            rib_repl_crate::anyhow::bail!("unexpected component id (only one component is supported)");
+            rib_repl_crate::anyhow::bail!(
+                "unexpected component id (only one component is supported)"
+            );
         }
 
         let parsed = ParsedFunctionName::parse(function_name).map_err(|e| {
@@ -225,10 +225,7 @@ impl ComponentFunctionInvoke for WasmtimeWorkerInvoke {
             params.push(value_and_type_to_val(ty, arg)?);
         }
 
-        let mut results: Vec<Val> = result_tys
-            .iter()
-            .map(|_| Val::Bool(false))
-            .collect();
+        let mut results: Vec<Val> = result_tys.iter().map(|_| Val::Bool(false)).collect();
 
         call_func(&mut store, func, &params, &mut results).await?;
 
@@ -254,10 +251,7 @@ impl ComponentFunctionInvoke for WasmtimeWorkerInvoke {
                     .collect();
                 let parts = vals?;
                 let inner: Vec<Value> = parts.into_iter().map(|v| v.value).collect();
-                Some(ValueAndType::new(
-                    Value::Tuple(inner),
-                    tuple_ty.clone(),
-                ))
+                Some(ValueAndType::new(Value::Tuple(inner), tuple_ty.clone()))
             }
         };
 
@@ -316,7 +310,9 @@ fn resolve_export(
         instance = Some(
             component
                 .get_export_index(instance.as_ref(), name)
-                .ok_or_else(|| rib_repl_crate::anyhow::anyhow!("missing instance export `{name}`"))?,
+                .ok_or_else(|| {
+                    rib_repl_crate::anyhow::anyhow!("missing instance export `{name}`")
+                })?,
         );
     }
     let last = path.last().unwrap();
@@ -357,11 +353,7 @@ fn collect_component_funcs(
     engine: &Engine,
     component: types::Component,
 ) -> Vec<(Vec<String>, types::ComponentFunc)> {
-    fn walk(
-        engine: &Engine,
-        item: CItem,
-        prefix: Vec<String>,
-    ) -> Vec<(Vec<String>, CItem)> {
+    fn walk(engine: &Engine, item: CItem, prefix: Vec<String>) -> Vec<(Vec<String>, CItem)> {
         match item {
             CItem::Component(c) => c
                 .exports(engine)
@@ -538,14 +530,21 @@ fn wasm_type_to_wit(ty: &WType) -> rib_repl_crate::anyhow::Result<WitType> {
             resource_id: AnalysedResourceId(0),
             mode: AnalysedResourceMode::Borrowed,
         }),
-        WType::Map(_) => rib_repl_crate::anyhow::bail!("Rib metadata does not support WIT `map` yet"),
+        WType::Map(_) => {
+            rib_repl_crate::anyhow::bail!("Rib metadata does not support WIT `map` yet")
+        }
         WType::Future(_) | WType::Stream(_) | WType::ErrorContext => {
-            rib_repl_crate::anyhow::bail!("async component types are not supported in Rib metadata yet")
+            rib_repl_crate::anyhow::bail!(
+                "async component types are not supported in Rib metadata yet"
+            )
         }
     })
 }
 
-fn value_and_type_to_val(expected: &WType, v: &ValueAndType) -> rib_repl_crate::anyhow::Result<Val> {
+fn value_and_type_to_val(
+    expected: &WType,
+    v: &ValueAndType,
+) -> rib_repl_crate::anyhow::Result<Val> {
     use rib::wit_type::WitType as WT;
     match (expected, &v.value) {
         (WType::Bool, Value::Bool(b)) => Ok(Val::Bool(*b)),
@@ -562,7 +561,9 @@ fn value_and_type_to_val(expected: &WType, v: &ValueAndType) -> rib_repl_crate::
         (WType::Char, Value::Char(c)) => Ok(Val::Char(*c)),
         (WType::String, Value::String(s)) => Ok(Val::String(s.clone())),
         (WType::List(_), Value::List(items)) => {
-            let WType::List(l) = expected else { unreachable!() };
+            let WType::List(l) = expected else {
+                unreachable!()
+            };
             let elem = l.ty();
             let inner = if let WT::List(lt) = &v.typ {
                 items
@@ -580,7 +581,9 @@ fn value_and_type_to_val(expected: &WType, v: &ValueAndType) -> rib_repl_crate::
             Ok(Val::List(inner))
         }
         (WType::Record(_), Value::Record(items)) => {
-            let WType::Record(r) = expected else { unreachable!() };
+            let WType::Record(r) = expected else {
+                unreachable!()
+            };
             let WT::Record(rec_ty) = &v.typ else {
                 rib_repl_crate::anyhow::bail!("record type mismatch");
             };
@@ -604,7 +607,9 @@ fn value_and_type_to_val(expected: &WType, v: &ValueAndType) -> rib_repl_crate::
             Ok(Val::Record(pairs?))
         }
         (WType::Tuple(_), Value::Tuple(items)) => {
-            let WType::Tuple(t) = expected else { unreachable!() };
+            let WType::Tuple(t) = expected else {
+                unreachable!()
+            };
             let WT::Tuple(tup_ty) = &v.typ else {
                 rib_repl_crate::anyhow::bail!("tuple type mismatch");
             };
@@ -612,12 +617,22 @@ fn value_and_type_to_val(expected: &WType, v: &ValueAndType) -> rib_repl_crate::
                 .types()
                 .zip(items.iter())
                 .zip(tup_ty.items.iter())
-                .map(|((wt, val), at)| value_and_type_to_val(&wt, &ValueAndType::new(val.clone(), at.clone())))
+                .map(|((wt, val), at)| {
+                    value_and_type_to_val(&wt, &ValueAndType::new(val.clone(), at.clone()))
+                })
                 .collect::<rib_repl_crate::anyhow::Result<Vec<_>>>()?;
             Ok(Val::Tuple(inner))
         }
-        (WType::Variant(_), Value::Variant { case_idx, case_value }) => {
-            let WType::Variant(wasm_var) = expected else { unreachable!() };
+        (
+            WType::Variant(_),
+            Value::Variant {
+                case_idx,
+                case_value,
+            },
+        ) => {
+            let WType::Variant(wasm_var) = expected else {
+                unreachable!()
+            };
             let cases: Vec<_> = wasm_var.cases().collect();
             let case = cases
                 .get(*case_idx as usize)
@@ -646,7 +661,9 @@ fn value_and_type_to_val(expected: &WType, v: &ValueAndType) -> rib_repl_crate::
             Ok(Val::Variant(case.name.to_string(), payload))
         }
         (WType::Enum(_), Value::Enum(idx)) => {
-            let WType::Enum(e) = expected else { unreachable!() };
+            let WType::Enum(e) = expected else {
+                unreachable!()
+            };
             let name = e
                 .names()
                 .nth(*idx as usize)
@@ -654,7 +671,9 @@ fn value_and_type_to_val(expected: &WType, v: &ValueAndType) -> rib_repl_crate::
             Ok(Val::Enum(name.to_string()))
         }
         (WType::Option(_), Value::Option(inner)) => {
-            let WType::Option(o) = expected else { unreachable!() };
+            let WType::Option(o) = expected else {
+                unreachable!()
+            };
             let WT::Option(opt_ty) = &v.typ else {
                 rib_repl_crate::anyhow::bail!("option type mismatch");
             };
@@ -668,7 +687,9 @@ fn value_and_type_to_val(expected: &WType, v: &ValueAndType) -> rib_repl_crate::
             Ok(Val::Option(mapped))
         }
         (WType::Result(_), Value::Result(inner)) => {
-            let WType::Result(r) = expected else { unreachable!() };
+            let WType::Result(r) = expected else {
+                unreachable!()
+            };
             let WT::Result(res_ty) = &v.typ else {
                 rib_repl_crate::anyhow::bail!("result type mismatch");
             };
@@ -676,13 +697,12 @@ fn value_and_type_to_val(expected: &WType, v: &ValueAndType) -> rib_repl_crate::
                 Ok(v) => Ok(match v {
                     None => None,
                     Some(b) => {
-                        let wt = r
-                            .ok()
-                            .ok_or_else(|| rib_repl_crate::anyhow::anyhow!("result ok type missing"))?;
-                        let at = res_ty
-                            .ok
-                            .as_deref()
-                            .ok_or_else(|| rib_repl_crate::anyhow::anyhow!("result ok type missing"))?;
+                        let wt = r.ok().ok_or_else(|| {
+                            rib_repl_crate::anyhow::anyhow!("result ok type missing")
+                        })?;
+                        let at = res_ty.ok.as_deref().ok_or_else(|| {
+                            rib_repl_crate::anyhow::anyhow!("result ok type missing")
+                        })?;
                         Some(Box::new(value_and_type_to_val(
                             &wt,
                             &ValueAndType::new((**b).clone(), at.clone()),
@@ -692,13 +712,12 @@ fn value_and_type_to_val(expected: &WType, v: &ValueAndType) -> rib_repl_crate::
                 Err(v) => Err(match v {
                     None => None,
                     Some(b) => {
-                        let wt = r
-                            .err()
-                            .ok_or_else(|| rib_repl_crate::anyhow::anyhow!("result err type missing"))?;
-                        let at = res_ty
-                            .err
-                            .as_deref()
-                            .ok_or_else(|| rib_repl_crate::anyhow::anyhow!("result err type missing"))?;
+                        let wt = r.err().ok_or_else(|| {
+                            rib_repl_crate::anyhow::anyhow!("result err type missing")
+                        })?;
+                        let at = res_ty.err.as_deref().ok_or_else(|| {
+                            rib_repl_crate::anyhow::anyhow!("result err type missing")
+                        })?;
                         Some(Box::new(value_and_type_to_val(
                             &wt,
                             &ValueAndType::new((**b).clone(), at.clone()),
@@ -709,11 +728,18 @@ fn value_and_type_to_val(expected: &WType, v: &ValueAndType) -> rib_repl_crate::
             Ok(Val::Result(mapped))
         }
         (WType::Flags(_), Value::Flags(bits)) => {
-            let WType::Flags(f) = expected else { unreachable!() };
+            let WType::Flags(f) = expected else {
+                unreachable!()
+            };
             let names: Vec<String> = f
                 .names()
                 .enumerate()
-                .filter_map(|(i, n)| bits.get(i).copied().unwrap_or(false).then_some(n.to_string()))
+                .filter_map(|(i, n)| {
+                    bits.get(i)
+                        .copied()
+                        .unwrap_or(false)
+                        .then_some(n.to_string())
+                })
                 .collect();
             Ok(Val::Flags(names))
         }
@@ -803,15 +829,16 @@ fn val_to_value_and_type(ty: &WitType, v: &Val) -> rib_repl_crate::anyhow::Resul
                 .cases
                 .iter()
                 .position(|c| c == name)
-                .ok_or_else(|| rib_repl_crate::anyhow::anyhow!("unknown enum case `{name}`"))? as u32;
+                .ok_or_else(|| rib_repl_crate::anyhow::anyhow!("unknown enum case `{name}`"))?
+                as u32;
             ValueAndType::new(Value::Enum(idx), ty.clone())
         }
         (WT::Option(ot), Val::Option(inner)) => {
             let v = match inner {
                 None => Value::Option(None),
-                Some(b) => Value::Option(Some(Box::new(
-                    val_to_value_and_type(&ot.inner, b)?.value,
-                ))),
+                Some(b) => {
+                    Value::Option(Some(Box::new(val_to_value_and_type(&ot.inner, b)?.value)))
+                }
             };
             ValueAndType::new(v, ty.clone())
         }
@@ -821,7 +848,9 @@ fn val_to_value_and_type(ty: &WitType, v: &Val) -> rib_repl_crate::anyhow::Resul
                     None => None,
                     Some(b) => Some(Box::new(
                         val_to_value_and_type(
-                            rt.ok.as_deref().ok_or_else(|| rib_repl_crate::anyhow::anyhow!("ok type"))?,
+                            rt.ok
+                                .as_deref()
+                                .ok_or_else(|| rib_repl_crate::anyhow::anyhow!("ok type"))?,
                             b,
                         )?
                         .value,
@@ -831,7 +860,9 @@ fn val_to_value_and_type(ty: &WitType, v: &Val) -> rib_repl_crate::anyhow::Resul
                     None => None,
                     Some(b) => Some(Box::new(
                         val_to_value_and_type(
-                            rt.err.as_deref().ok_or_else(|| rib_repl_crate::anyhow::anyhow!("err type"))?,
+                            rt.err
+                                .as_deref()
+                                .ok_or_else(|| rib_repl_crate::anyhow::anyhow!("err type"))?,
                             b,
                         )?
                         .value,
