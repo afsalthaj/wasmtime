@@ -18,6 +18,9 @@
 namespace wasmtime {
 
 class Caller;
+class Tag;
+class Exn;
+class Trap;
 
 /// \brief An enum for the behavior before extending the epoch deadline.
 enum class DeadlineKind {
@@ -72,8 +75,10 @@ public:
     friend class Linker;
     friend class ExternRef;
     friend class AnyRef;
+    friend class EqRef;
     friend class Val;
     friend class Store;
+    friend class Tag;
     wasmtime_context_t *ptr;
 
   public:
@@ -89,6 +94,7 @@ public:
     /// Creates a context referencing the provided `Caller`.
     Context(Caller *caller);
 
+#ifdef WASMTIME_FEATURE_GC
     /// Runs a garbage collection pass in the referenced store to collect loose
     /// `externref` values, if any are available.
     Result<std::monostate> gc() {
@@ -98,6 +104,7 @@ public:
       }
       return std::monostate();
     }
+#endif
 
     /// Injects fuel to be consumed within this store.
     ///
@@ -161,6 +168,23 @@ public:
     void set_epoch_deadline(uint64_t ticks_beyond_current) {
       wasmtime_context_set_epoch_deadline(ptr, ticks_beyond_current);
     }
+
+#ifdef WASMTIME_FEATURE_GC
+    /// \brief Sets the pending exception on the store and returns a Trap.
+    ///
+    /// This transfers ownership of `exn`. After this call, `exn` is consumed.
+    /// Returns a Trap that the host callback MUST return to propagate the
+    /// exception through Wasm catch blocks.
+    inline Trap throw_exception(Exn exn);
+
+    /// \brief Takes the pending exception from the store, if any.
+    ///
+    /// Returns the exception if one was pending, or std::nullopt.
+    inline std::optional<Exn> take_exception();
+
+    /// \brief Tests whether there is a pending exception on the store.
+    inline bool has_exception();
+#endif // WASMTIME_FEATURE_GC
 
     /// \brief Returns the underlying C API pointer.
     const wasmtime_context_t *capi() const { return ptr; }
@@ -231,9 +255,11 @@ public:
   /// Explicit function to acquire a `Context` from this store.
   Context context() { return this; }
 
+#ifdef WASMTIME_FEATURE_GC
   /// Runs a garbage collection pass in the referenced store to collect loose
   /// GC-managed objects, if any are available.
   Result<std::monostate> gc() { return context().gc(); }
+#endif
 
 private:
   template <typename F>

@@ -122,6 +122,7 @@ impl Config {
     /// to execute all tests.
     pub fn make_wast_test_compliant(&mut self, test: &WastTest) -> WastConfig {
         let wasmtime_test_util::wast::TestConfig {
+            bulk_memory,
             memory64,
             custom_page_sizes,
             multi_memory,
@@ -174,7 +175,7 @@ impl Config {
         // Enable/disable proposals that wasm-smith has knobs for which will be
         // read when creating `wasmtime::Config`.
         let config = &mut self.module_config.config;
-        config.bulk_memory_enabled = true;
+        config.bulk_memory_enabled = bulk_memory.unwrap_or(false);
         config.multi_value_enabled = true;
         config.wide_arithmetic_enabled = wide_arithmetic.unwrap_or(false);
         config.memory64_enabled = memory64.unwrap_or(false);
@@ -285,7 +286,7 @@ impl Config {
             self.wasmtime.memory_guaranteed_dense_image_size,
         ));
         cfg.wasm.async_stack_zeroing = Some(self.wasmtime.async_stack_zeroing);
-        cfg.wasm.bulk_memory = Some(true);
+        cfg.wasm.bulk_memory = Some(self.module_config.config.bulk_memory_enabled);
         cfg.wasm.component_model_async = Some(self.module_config.component_model_async);
         cfg.wasm.component_model_async_builtins =
             Some(self.module_config.component_model_async_builtins);
@@ -331,14 +332,12 @@ impl Config {
 
         self.wasmtime.codegen.configure(&mut cfg);
 
-        // Determine whether we will actually enable PCC -- this is
-        // disabled if the module requires memory64, which is not yet
-        // compatible (due to the need for dynamic checks).
-        let pcc = cfg!(feature = "fuzz-pcc")
-            && self.wasmtime.pcc
-            && !self.module_config.config.memory64_enabled;
-
         cfg.codegen.inlining = self.wasmtime.inlining;
+
+        // If the wasm-smith-generated module use nan canonicalization then we
+        // don't need to enable it, but if it doesn't enable it already then we
+        // enable this codegen option.
+        cfg.wasm.nan_canonicalization = Some(!self.module_config.config.canonicalize_nans);
 
         // Only set cranelift specific flags when the Cranelift strategy is
         // chosen.
@@ -364,11 +363,6 @@ impl Config {
                 ));
             }
 
-            // If the wasm-smith-generated module use nan canonicalization then we
-            // don't need to enable it, but if it doesn't enable it already then we
-            // enable this codegen option.
-            cfg.wasm.nan_canonicalization = Some(!self.module_config.config.canonicalize_nans);
-
             // Enabling the verifier will at-least-double compilation time, which
             // with a 20-30x slowdown in fuzzing can cause issues related to
             // timeouts. If generated modules can have more than a small handful of
@@ -392,8 +386,6 @@ impl Config {
                 ));
             }
 
-            cfg.codegen.pcc = Some(pcc);
-
             // Eager init is currently only supported on Cranelift, not Winch.
             cfg.opts.table_lazy_init = Some(self.wasmtime.table_lazy_init);
         }
@@ -411,22 +403,7 @@ impl Config {
         //   `CustomUnaligned` variant isn't actually safe to use with a shared
         //   memory.
         if !self.module_config.config.threads_enabled {
-            // If PCC is enabled, force other options to be compatible: PCC is currently only
-            // supported when bounds checks are elided.
-            let memory_config = if pcc {
-                MemoryConfig {
-                    memory_reservation: Some(4 << 30), // 4 GiB
-                    memory_guard_size: Some(2 << 30),  // 2 GiB
-                    memory_reservation_for_growth: Some(0),
-                    guard_before_linear_memory: false,
-                    memory_init_cow: true,
-                    // Doesn't matter, only using virtual memory.
-                    cranelift_enable_heap_access_spectre_mitigations: None,
-                }
-            } else {
-                self.wasmtime.memory_config.clone()
-            };
-
+            let memory_config = self.wasmtime.memory_config.clone();
             memory_config.configure(&mut cfg);
         };
 
@@ -619,9 +596,6 @@ pub struct WasmtimeConfig {
     pub compiler_strategy: CompilerStrategy,
     collector: Collector,
     table_lazy_init: bool,
-
-    /// Whether or not fuzzing should enable PCC.
-    pcc: bool,
 
     /// Configuration for whether wasm is invoked in an async fashion and how
     /// it's cooperatively time-sliced.

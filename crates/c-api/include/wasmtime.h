@@ -190,6 +190,7 @@
 #include <wasmtime/config.h>
 #include <wasmtime/engine.h>
 #include <wasmtime/error.h>
+#include <wasmtime/exn.h>
 #include <wasmtime/extern.h>
 #include <wasmtime/func.h>
 #include <wasmtime/global.h>
@@ -201,8 +202,10 @@
 #include <wasmtime/sharedmemory.h>
 #include <wasmtime/store.h>
 #include <wasmtime/table.h>
+#include <wasmtime/tag.h>
 #include <wasmtime/trap.h>
 #include <wasmtime/val.h>
+#include <wasmtime/gc.h>
 #include <wasmtime/async.h>
 #include <wasmtime/component.h>
 #include <wasmtime/wat.h>
@@ -212,11 +215,11 @@
 /**
  * \brief Wasmtime version string.
  */
-#define WASMTIME_VERSION "44.0.0"
+#define WASMTIME_VERSION "45.0.0"
 /**
  * \brief Wasmtime major version number.
  */
-#define WASMTIME_VERSION_MAJOR 44
+#define WASMTIME_VERSION_MAJOR 45
 /**
  * \brief Wasmtime minor version number.
  */

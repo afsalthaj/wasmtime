@@ -623,7 +623,7 @@
             ;; the mask below.
             (unmasked Xmm (x64_psllw src (mov_rmi_to_xmm masked_amt)))
             (mask_addr SyntheticAmode (ishl_i8x16_mask masked_amt))
-            (mask Reg (x64_load $I8X16 mask_addr (ExtKind.None))))
+            (mask Reg (x64_movdqu_load mask_addr)))
         (sse_and $I8X16 unmasked (RegMem.Reg mask))))
 
 ;; Get the address of the mask to use when fixing up the lanes that weren't
@@ -656,7 +656,7 @@
                               (mem_flags_trusted))))
 
 (rule (ishl_i8x16_mask (RegMemImm.Mem amt))
-      (ishl_i8x16_mask (RegMemImm.Reg (x64_load $I64 amt (ExtKind.None)))))
+      (ishl_i8x16_mask (RegMemImm.Reg (x64_movq_rm amt))))
 
 ;; 16x8, 32x4, and 64x2 shifts can each use a single instruction, once the shift amount is masked.
 
@@ -762,7 +762,7 @@
                               (mem_flags_trusted))))
 
 (rule (ushr_i8x16_mask (RegMemImm.Mem amt))
-      (ushr_i8x16_mask (RegMemImm.Reg (x64_load $I64 amt (ExtKind.None)))))
+      (ushr_i8x16_mask (RegMemImm.Reg (x64_movq_rm amt))))
 
 ;; 16x8, 32x4, and 64x2 shifts can each use a single instruction, once the shift amount is masked.
 
@@ -1978,11 +1978,11 @@
 
 ;; Peephole optimization for `0 <= x`, when x is a signed 32 bit value
 (rule 2 (lower (has_type $I8 (icmp _ (IntCC.SignedLessThanOrEqual) (u64_from_iconst 0) x @ (value_type $I32))))
-      (x64_shrl_mi (x64_not $I64 x) 31))
+      (x64_shrl_mi (x64_not $I32 x) 31))
 
 ;; Peephole optimization for `x >= 0`, when x is a signed 32 bit value
 (rule 2 (lower (has_type $I8 (icmp _ (IntCC.SignedGreaterThanOrEqual) x @ (value_type $I32) (u64_from_iconst 0))))
-      (x64_shrl_mi (x64_not $I64 x) 31))
+      (x64_shrl_mi (x64_not $I32 x) 31))
 
 ;; For XMM-held values, we lower to `PCMP*` instructions, sometimes more than
 ;; one. To note: what is different here about the output values is that each
@@ -3094,7 +3094,7 @@
 (rule -3 (lower (has_type $I128
                        (load _ (little_or_native_endian flags) address offset)))
       (let ((addr_lo SyntheticAmode (to_amode flags address offset))
-            (addr_hi SyntheticAmode (amode_offset addr_lo 8))
+            (addr_hi SyntheticAmode (amode_offset addr_lo flags 8))
             (value_lo Reg (x64_mov addr_lo))
             (value_hi Reg (x64_mov addr_hi)))
         (value_regs value_lo value_hi)))
@@ -3225,7 +3225,7 @@
             (value_lo Gpr (value_regs_get_gpr value_reg 0))
             (value_hi Gpr (value_regs_get_gpr value_reg 1))
             (addr_lo SyntheticAmode (to_amode flags address offset))
-            (addr_hi SyntheticAmode (amode_offset addr_lo 8)))
+            (addr_hi SyntheticAmode (amode_offset addr_lo flags 8)))
       (side_effect
        (side_effect_concat
         (x64_movrm $I64 addr_lo value_lo)
@@ -3450,7 +3450,7 @@
 ;; Lower 128-bit `atomic_store` using `cmpxchg16b`.
 (rule 1 (lower (atomic_store (little_or_native_endian flags) value @ (value_type $I128) address))
       (if-let true (has_cmpxchg16b))
-      (side_effect (x64_atomic_128_store_seq (to_amode flags address (zero_offset)) value)))
+      (side_effect (x64_atomic_128_store_seq (to_amode flags address (zero_offset)) flags value)))
 
 ;; Rules for `atomic_cas` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -3512,7 +3512,7 @@
 ;; 128-bit integers always use a `lock cmpxchg16b` loop.
 (rule 3 (lower (has_type $I128 (atomic_rmw _ (little_or_native_endian flags) op address input)))
         (if-let true (has_cmpxchg16b))
-        (x64_atomic_128_rmw_seq op (to_amode flags address (zero_offset)) input))
+        (x64_atomic_128_rmw_seq op (to_amode flags address (zero_offset)) flags input))
 
 ;; Rules for `call` and `call_indirect` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -3624,9 +3624,7 @@
       (x64_rsp))
 
 (rule (lower (get_return_address _))
-      (x64_load $I64
-                (Amode.ImmReg 8 (x64_rbp) (mem_flags_trusted))
-                (ExtKind.None)))
+      (x64_movq_rm (Amode.ImmReg 8 (x64_rbp) (mem_flags_trusted))))
 
 ;; Rules for `jump` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -4355,7 +4353,7 @@
         )
         (x64_movlhps result a1)))
 (rule (x64_round ty (RegMem.Mem addr) imm)
-      (x64_round ty (RegMem.Reg (x64_load ty addr (ExtKind.ZeroExtend))) imm))
+      (x64_round ty (RegMem.Reg (x64_load_xmm ty addr)) imm))
 
 (decl round_libcall (Type RoundImm) LibCall)
 (rule (round_libcall $F32 (RoundImm.RoundUp)) (LibCall.CeilF32))
@@ -4878,7 +4876,7 @@
 ;; on AVX2 to leverage that specific instruction for this operation.
 (rule 0 (lower (has_type $F32X4 (splat _ src)))
         (let ((tmp Xmm src))
-          (x64_shufps src src 0)))
+          (x64_shufps tmp tmp 0)))
 (rule 1 (lower (has_type $F32X4 (splat _ src)))
         (if-let true (use_avx2))
         (x64_vbroadcastss src))
@@ -4905,7 +4903,7 @@
 (rule 0 (lower (has_type $I64X2 (splat _ src)))
         (x64_pshufd (bitcast_gpr_to_xmm 64 src) 0b01_00_01_00))
 (rule 0 (lower (has_type $F64X2 (splat _ src)))
-        (x64_pshufd src 0b01_00_01_00))
+        (x64_pshufd (put_in_xmm src) 0b01_00_01_00))
 (rule 6 (lower (has_type (multi_lane 64 2) (splat _ (sinkable_load addr))))
         (if-let true (has_sse3))
         (x64_movddup addr))

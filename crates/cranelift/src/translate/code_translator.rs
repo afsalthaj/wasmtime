@@ -203,31 +203,47 @@ pub fn translate_operator(
         Operator::Drop => {
             environ.stacks.pop1();
         }
-        Operator::Select => {
-            let (mut arg1, mut arg2, cond) = environ.stacks.pop3();
-            if builder.func.dfg.value_type(arg1).is_vector() {
-                arg1 = optionally_bitcast_vector(arg1, I8X16, builder);
-            }
-            if builder.func.dfg.value_type(arg2).is_vector() {
-                arg2 = optionally_bitcast_vector(arg2, I8X16, builder);
-            }
-            environ.stacks.push1(builder.ins().select(cond, arg1, arg2));
+        Operator::Nop => {
+            // We do nothing
         }
-        Operator::TypedSelect { ty: _ } => {
+        Operator::Select
+        | Operator::TypedSelect {
             // We ignore the explicit type parameter as it is only needed for
             // validation, which we require to have been performed before
             // translation.
+            ty: _,
+        } => {
             let (mut arg1, mut arg2, cond) = environ.stacks.pop3();
+
             if builder.func.dfg.value_type(arg1).is_vector() {
                 arg1 = optionally_bitcast_vector(arg1, I8X16, builder);
             }
             if builder.func.dfg.value_type(arg2).is_vector() {
                 arg2 = optionally_bitcast_vector(arg2, I8X16, builder);
             }
-            environ.stacks.push1(builder.ins().select(cond, arg1, arg2));
-        }
-        Operator::Nop => {
-            // We do nothing
+
+            let val = builder.ins().select(cond, arg1, arg2);
+
+            // If either of the input types need inclusion in stack maps, then
+            // the result will as well.
+            //
+            // Note that we don't need to check whether the result's type needs
+            // inclusion in stack maps (that would be a conservative over
+            // approximation) because the input types give us more-precise
+            // information than the result type does. For example, the result
+            // does not need inclusion in stack maps in the scenario where both
+            // inputs are `i31ref`s and the result is an `anyref`. Even though
+            // `anyref`s normally do require inclusion in stack maps, in this
+            // particular case, we know that we are dealing with an `anyref`
+            // that doesn't actually require inclusion.
+            if operand_types
+                .iter()
+                .any(|ty| environ.val_ty_needs_stack_map(*ty))
+            {
+                builder.declare_value_needs_stack_map(val);
+            }
+
+            environ.stacks.push1(val);
         }
         Operator::Unreachable => {
             environ.trap(builder, crate::TRAP_UNREACHABLE);
@@ -3619,11 +3635,6 @@ fn prepare_addr(
     // guarantee. WebAssembly memory accesses are always little-endian.
     let mut flags = MemFlags::new();
     flags.set_endianness(ir::Endianness::Little);
-
-    if heap.pcc_memory_type.is_some() {
-        // Proof-carrying code is enabled; check this memory access.
-        flags.set_checked();
-    }
 
     // The access occurs to the `heap` disjoint category of abstract
     // state. This may allow alias analysis to merge redundant loads,

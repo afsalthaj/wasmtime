@@ -215,6 +215,61 @@ class Linker {
     return std::monostate();
   }
 #endif // WASMTIME_FEATURE_WASI
+
+#ifdef WASMTIME_FEATURE_WASI_HTTP
+  /**
+   * \brief Adds WASI HTTP definitions to this linker.
+   *
+   * This adds `wasi:http/types` and `wasi:http/outgoing-handler` to the linker.
+   * Requires WASIp2 to be added first via \ref add_wasip2.
+   */
+  Result<std::monostate> add_wasi_http() {
+    wasmtime_error_t *error =
+        wasmtime_component_linker_add_wasi_http(ptr.get());
+    if (error != nullptr) {
+      return Error(error);
+    }
+    return std::monostate();
+  }
+#endif // WASMTIME_FEATURE_WASI_HTTP
+
+#ifdef WASMTIME_FEATURE_COMPONENT_MODEL_ASYNC
+#ifdef WASMTIME_FEATURE_WASI
+  /**
+   * \brief Adds WASIp2 API definitions to this linker using async bindings.
+   *
+   * This is the same as \ref add_wasip2 except that it adds *asynchronous*
+   * versions of WASIp2 definitions. Only compatible with stores associated
+   * with an asynchronous config.
+   */
+  Result<std::monostate> add_wasip2_async() {
+    wasmtime_error_t *error =
+        wasmtime_component_linker_add_wasip2_async(ptr.get());
+    if (error != nullptr) {
+      return Error(error);
+    }
+    return std::monostate();
+  }
+#endif // WASMTIME_FEATURE_WASI
+
+#ifdef WASMTIME_FEATURE_WASI_HTTP
+  /**
+   * \brief Adds WASI HTTP definitions to this linker using async bindings.
+   *
+   * This is the same as \ref add_wasi_http except that it adds
+   * *asynchronous* versions. Only compatible with stores associated with an
+   * asynchronous config.
+   */
+  Result<std::monostate> add_wasi_http_async() {
+    wasmtime_error_t *error =
+        wasmtime_component_linker_add_wasi_http_async(ptr.get());
+    if (error != nullptr) {
+      return Error(error);
+    }
+    return std::monostate();
+  }
+#endif // WASMTIME_FEATURE_WASI_HTTP
+#endif // WASMTIME_FEATURE_COMPONENT_MODEL_ASYNC
 };
 
 } // namespace component

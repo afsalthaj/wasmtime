@@ -1692,10 +1692,18 @@ impl Default for VMSharedTypeIndex {
 pub struct DataIndex(u32);
 entity_impl_with_try_clone!(DataIndex);
 
-/// Index type of a passive element segment inside the WebAssembly module.
+/// Index type of an element segment inside the WebAssembly module.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub struct ElemIndex(u32);
 entity_impl_with_try_clone!(ElemIndex);
+
+/// Dense index space of the subset of element segments that are passive.
+///
+/// Not a spec-level concept, just used to get dense index spaces for passive
+/// element segments inside of Wasmtime.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize)]
+pub struct PassiveElemIndex(u32);
+entity_impl_with_try_clone!(PassiveElemIndex);
 
 /// Index type of a defined tag inside the WebAssembly module.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize)]
@@ -2319,6 +2327,36 @@ impl Memory {
         // initial memory reservation then the memory may move.
         let max = self.maximum_byte_size().unwrap_or(u64::MAX);
         max > tunables.memory_reservation
+    }
+
+    /// Tests whether this memory type is allowed to grow up to `size` bytes.
+    ///
+    /// This is only applicable to custom-page-size memories which have a page
+    /// size of a single byte. In that situation growth beyond `-1i32 as u32`
+    /// bytes is not allowed because at that point memory growth succeeding and
+    /// failing would be indistinguishable in the return value of `memory.grow`,
+    /// for example. To handle this 32-bit memories are only allowed to grow to
+    /// `-2i32 as u32`, for example, and 64-bit memories with a page size of 1
+    /// are allowed to grow up to the maximum size.
+    pub fn allow_growth_to(&self, size: usize) -> bool {
+        if self.page_size_log2 != 0 {
+            return true;
+        }
+        match self.idx_type {
+            // For a 32-bit memory using 1-byte pages the last 2 bytes of the
+            // 32-bit address space are addressable but disallowed for now.  A
+            // memory that is 4GiB in size cannot report its size via
+            // `memory.size`, and a memory that is 4GiB-1 bytes in size cannot
+            // be distinguished when 1 byte is added from an allocation
+            // failure.  To handle this the memory is capped at 4GiB-2 which
+            // means that all memory-related instructions and such will have
+            // unambiguous return codes.
+            IndexType::I32 => size < 0xffff_ffff,
+
+            // Assume that for a 64-bit memory using 1-byte pages it's going to
+            // exhaust system resources before a limit is actually reached.
+            IndexType::I64 => true,
+        }
     }
 }
 

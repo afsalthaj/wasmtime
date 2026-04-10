@@ -6,12 +6,20 @@
 #define WASMTIME_VAL_HH
 
 #include <optional>
+#ifdef WASMTIME_FEATURE_GC
+#include <wasmtime/gc.h>
+#endif // WASMTIME_FEATURE_GC
 #include <wasmtime/store.hh>
 #include <wasmtime/types/val.hh>
 #include <wasmtime/val.h>
 
 namespace wasmtime {
 
+class EqRef;
+class StructRef;
+class ArrayRef;
+
+#ifdef WASMTIME_FEATURE_GC
 /**
  * \brief Representation of a WebAssembly `externref` value.
  *
@@ -98,7 +106,11 @@ public:
     return wasmtime_externref_to_raw(cx.capi(), &val);
   }
 };
+#endif // WASMTIME_FEATURE_GC
 
+class EqRef;
+
+#ifdef WASMTIME_FEATURE_GC
 /**
  * \brief Representation of a WebAssembly `anyref` value.
  */
@@ -173,7 +185,31 @@ public:
       return ret;
     return std::nullopt;
   }
+
+  /// \brief Returns `true` if this anyref is an i31ref.
+  bool is_i31(Store::Context cx) const {
+    return wasmtime_anyref_is_i31(cx.ptr, &val);
+  }
+
+  /// \brief Returns `true` if this anyref is an eqref.
+  inline bool is_eqref(Store::Context cx) const;
+
+  /// \brief Returns `true` if this anyref is a structref.
+  inline bool is_struct(Store::Context cx) const;
+
+  /// \brief Returns `true` if this anyref is an arrayref.
+  inline bool is_array(Store::Context cx) const;
+
+  /// \brief Downcast to eqref. Returns null eqref if not an eqref.
+  inline std::optional<EqRef> as_eqref(Store::Context cx) const;
+
+  /// \brief Downcast to structref. Returns null structref if not a structref.
+  inline std::optional<StructRef> as_struct(Store::Context cx) const;
+
+  /// \brief Downcast to arrayref. Returns null arrayref if not an arrayref.
+  inline std::optional<ArrayRef> as_array(Store::Context cx) const;
 };
+#endif // WASMTIME_FEATURE_GC
 
 /// \brief Container for the `v128` WebAssembly type.
 struct V128 {
@@ -205,6 +241,9 @@ class Val {
   friend class Global;
   friend class Table;
   friend class Func;
+  friend class Exn;
+  friend class StructRef;
+  friend class ArrayRef;
 
   wasmtime_val_t val;
 
@@ -317,6 +356,8 @@ public:
       return ValKind::ExternRef;
     case WASMTIME_ANYREF:
       return ValKind::AnyRef;
+    case WASMTIME_EXNREF:
+      return ValKind::ExnRef;
     case WASMTIME_V128:
       return ValKind::V128;
     }

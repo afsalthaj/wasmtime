@@ -372,16 +372,34 @@ impl Func {
     /// Panics if the given function type is not associated with this store's
     /// engine.
     pub fn new<T: 'static>(
-        mut store: impl AsContextMut<Data = T>,
+        store: impl AsContextMut<Data = T>,
         ty: FuncType,
         func: impl Fn(Caller<'_, T>, &[Val], &mut [Val]) -> Result<()> + Send + Sync + 'static,
     ) -> Self {
+        Self::try_new_(store, ty, func).panic_on_oom()
+    }
+
+    /// Same as [`Func::new`] but returns an error instead of panicking on
+    /// allocation failure.
+    pub fn try_new<T: 'static>(
+        store: impl AsContextMut<Data = T>,
+        ty: FuncType,
+        func: impl Fn(Caller<'_, T>, &[Val], &mut [Val]) -> Result<()> + Send + Sync + 'static,
+    ) -> Result<Self> {
+        Ok(Self::try_new_(store, ty, func)?)
+    }
+
+    fn try_new_<T: 'static>(
+        mut store: impl AsContextMut<Data = T>,
+        ty: FuncType,
+        func: impl Fn(Caller<'_, T>, &[Val], &mut [Val]) -> Result<()> + Send + Sync + 'static,
+    ) -> Result<Self, OutOfMemory> {
         let store = store.as_context_mut().0;
-        let host = HostFunc::new(store.engine(), ty, func).panic_on_oom();
+        let host = HostFunc::new(store.engine(), ty, func)?;
 
         // SAFETY: the `T` used by `func` matches the `T` of the store we're
         // inserting into via this function's type signature.
-        unsafe { host.into_func(store).panic_on_oom() }
+        unsafe { host.into_func(store) }
     }
 
     /// Creates a new [`Func`] with the given arguments, although has fewer
@@ -1039,7 +1057,15 @@ impl Func {
     /// This value is safe to pass to [`Func::from_raw`] so long as the same
     /// `store` is provided.
     pub fn to_raw(&self, mut store: impl AsContextMut) -> *mut c_void {
-        self.vm_func_ref(store.as_context_mut().0).as_ptr().cast()
+        self.to_raw_(store.as_context_mut().0)
+    }
+
+    pub(crate) fn to_raw_(&self, store: &mut StoreOpaque) -> *mut c_void {
+        self.vm_func_ref(store).as_ptr().cast()
+    }
+
+    pub(crate) fn to_val_raw(&self, store: &mut StoreOpaque) -> ValRaw {
+        ValRaw::funcref(self.to_raw_(store))
     }
 
     /// Invokes this function with the `params` given, returning the results
@@ -1143,7 +1169,7 @@ impl Func {
         let values_vec_size = params.len().max(ty.results().len());
         let mut values_vec = store.0.take_wasm_val_raw_storage();
         debug_assert!(values_vec.is_empty());
-        values_vec.resize_with(values_vec_size, || ValRaw::v128(0));
+        values_vec.resize_with(values_vec_size, || ValRaw::v128(0))?;
         for (arg, slot) in params.iter().cloned().zip(&mut values_vec) {
             *slot = arg.to_raw(&mut *store)?;
         }
@@ -1530,9 +1556,12 @@ impl EntryStoreContext {
             //
             // After we've got the stack limit then we store it into the `stack_limit`
             // variable.
-            let wasm_stack_limit = stack_pointer
-                .checked_sub(store.engine().config().max_wasm_stack)
-                .unwrap();
+            //
+            // Also note that `saturating_sub` is used here since if the user
+            // said that the function gets nigh-infinite stack well then by
+            // golly it'll get nigh-infinite stack in which case the limit is 0.
+            let wasm_stack_limit =
+                stack_pointer.saturating_sub(store.engine().config().max_wasm_stack);
             let prev_stack = unsafe {
                 mem::replace(
                     &mut *store.0.vm_store_context().stack_limit.get(),

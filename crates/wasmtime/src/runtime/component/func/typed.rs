@@ -1680,17 +1680,21 @@ pub struct WasmStr {
 
 impl WasmStr {
     pub(crate) fn new(ptr: usize, len: usize, cx: &mut LiftContext<'_>) -> Result<WasmStr> {
-        let byte_len = match cx.options().string_encoding {
-            StringEncoding::Utf8 => Some(len),
-            StringEncoding::Utf16 => len.checked_mul(2),
+        let (byte_len, align) = match cx.options().string_encoding {
+            StringEncoding::Utf8 => (Some(len), 1_usize),
+            StringEncoding::Utf16 => (len.checked_mul(2), 2),
             StringEncoding::CompactUtf16 => {
                 if len & UTF16_TAG == 0 {
-                    Some(len)
+                    (Some(len), 2)
                 } else {
-                    (len ^ UTF16_TAG).checked_mul(2)
+                    ((len ^ UTF16_TAG).checked_mul(2), 2)
                 }
             }
         };
+        debug_assert!(align.is_power_of_two());
+        if ptr & (align - 1) != 0 {
+            bail!("string pointer not aligned to {align}");
+        }
         match byte_len.and_then(|len| ptr.checked_add(len)) {
             Some(n) if n <= cx.memory().len() => cx.consume_fuel(n - ptr)?,
             _ => bail!("string pointer/length out of bounds of memory"),
@@ -2315,7 +2319,7 @@ where
         .checked_mul(usize::try_from(map.entry_abi.size32)?)
         .and_then(|total| ptr.checked_add(total))
     {
-        Some(n) if n <= cx.memory().len() => cx.consume_fuel(n - ptr)?,
+        Some(n) if n <= cx.memory().len() => cx.consume_fuel_array(len, size_of::<(K, V)>())?,
         _ => bail!("map pointer/length out of bounds of memory"),
     }
     if ptr % (map.entry_abi.align32 as usize) != 0 {

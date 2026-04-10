@@ -732,11 +732,11 @@ impl<'a> Instantiator<'a> {
         let instance = ComponentInstance::new(
             store.store_data().components.next_component_instance_id(),
             component,
-            Arc::new(imported_resources),
+            try_new::<Arc<_>>(imported_resources)?,
             imports,
             store.traitobj(),
         )?;
-        let id = store.store_data_mut().push_component_instance(instance);
+        let id = store.store_data_mut().push_component_instance(instance)?;
 
         Ok(Instantiator {
             component,
@@ -878,7 +878,7 @@ impl<'a> Instantiator<'a> {
                         store.0.exit_guest_sync_call()?;
                     }
 
-                    self.instance_mut(store.0).push_instance_id(i.id());
+                    self.instance_mut(store.0).push_instance_id(i.id())?;
                 }
 
                 GlobalInitializer::LowerImport { import, index } => {
@@ -1046,7 +1046,7 @@ impl<'a> Instantiator<'a> {
             return;
         }
 
-        let val = crate::Extern::from_wasmtime_export(export, store);
+        let val = crate::Extern::from_wasmtime_export(export, store.engine());
         let ty = DefinitionType::from(store, &val);
         crate::types::matching::MatchCx::new(module.engine())
             .definition(&expected, &ty)

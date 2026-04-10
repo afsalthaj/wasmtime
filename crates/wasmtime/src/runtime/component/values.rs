@@ -1001,7 +1001,7 @@ fn load_map(cx: &mut LiftContext<'_>, ty: TypeMapIndex, ptr: usize, len: usize) 
         .checked_mul(tuple_size)
         .and_then(|len| ptr.checked_add(len))
     {
-        Some(n) if n <= cx.memory().len() => cx.consume_fuel(n - ptr)?,
+        Some(n) if n <= cx.memory().len() => cx.consume_fuel_array(len, size_of::<(Val, Val)>())?,
         _ => bail!("map pointer/length out of bounds of memory"),
     }
     if ptr % usize::try_from(tuple_alignment)? != 0 {
@@ -1045,13 +1045,10 @@ fn load_variant(
             u32::linear_lift_from_memory(cx, InterfaceType::U32, &bytes[..4])?
         }
     };
-    let case_ty = types.nth(discriminant as usize).ok_or_else(|| {
-        format_err!(
-            "discriminant {} out of range [0..{})",
-            discriminant,
-            types.len()
-        )
-    })?;
+    let len = types.len();
+    let case_ty = types
+        .nth(discriminant as usize)
+        .ok_or_else(|| format_err!("discriminant {discriminant} out of range [0..{len})"))?;
     let value = match case_ty {
         Some(case_ty) => {
             let payload_offset = usize::try_from(info.payload_offset32).unwrap();
@@ -1145,7 +1142,7 @@ fn lower_map<T>(
 }
 
 fn push_flags(ty: &TypeFlags, flags: &mut Vec<String>, mut offset: u32, mut bits: u32) {
-    while bits > 0 {
+    while bits > 0 && usize::try_from(offset).unwrap() < ty.names.len() {
         if bits & 1 != 0 {
             flags.push(ty.names[offset as usize].clone());
         }

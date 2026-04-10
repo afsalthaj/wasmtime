@@ -1569,118 +1569,6 @@ fn owned_rooted_lots_of_root_creation() -> Result<()> {
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn runtime_table_init_oom() -> Result<()> {
-    let mut config = Config::new();
-    config.wasm_gc(true);
-    config.wasm_function_references(true);
-    config.memory_may_move(false);
-    config.memory_reservation(64 << 10);
-    config.memory_reservation_for_growth(0);
-    let engine = Engine::new(&config)?;
-    let mut store = Store::new(&engine, ());
-
-    let module = Module::new(
-        store.engine(),
-        r#"
-            (module
-                (table 100 arrayref)
-
-                (type $a (array i31ref))
-
-                (func (export "run")
-                    i32.const 0
-                    i32.const 0
-                    i32.const 5
-                    table.init $e)
-                (elem $e arrayref
-                    (array.new_default $a (i32.const 100))
-                    (array.new_default $a (i32.const 10000))
-                    (array.new_default $a (i32.const 10000))
-                    (array.new_default $a (i32.const 10000))
-                    (array.new_default $a (i32.const 1000000))
-                )
-            )
-        "#,
-    )?;
-
-    let instance = Instance::new(&mut store, &module, &[])?;
-    let func = instance.get_typed_func::<(), ()>(&mut store, "run")?;
-    func.call(&mut store, ())
-        .unwrap_err()
-        .downcast::<GcHeapOutOfMemory<()>>()?;
-
-    Ok(())
-}
-
-#[test]
-#[cfg_attr(miri, ignore)]
-fn instantiate_table_init_oom() -> Result<()> {
-    let mut config = Config::new();
-    config.wasm_gc(true);
-    config.wasm_function_references(true);
-    config.memory_may_move(false);
-    config.memory_reservation(64 << 10);
-    config.memory_reservation_for_growth(0);
-    let engine = Engine::new(&config)?;
-    let mut store = Store::new(&engine, ());
-
-    let module = Module::new(
-        store.engine(),
-        r#"
-            (module
-                (table 100 arrayref)
-
-                (type $a (array i31ref))
-
-                (elem (i32.const 0) arrayref
-                    (array.new_default $a (i32.const 100))
-                    (array.new_default $a (i32.const 10000))
-                    (array.new_default $a (i32.const 10000))
-                    (array.new_default $a (i32.const 10000))
-                    (array.new_default $a (i32.const 1000000))
-                )
-            )
-        "#,
-    )?;
-
-    Instance::new(&mut store, &module, &[])
-        .unwrap_err()
-        .downcast::<GcHeapOutOfMemory<()>>()?;
-
-    Ok(())
-}
-
-#[test]
-#[cfg_attr(miri, ignore)]
-fn instantiate_table_init_expr_oom() -> Result<()> {
-    let mut config = Config::new();
-    config.wasm_gc(true);
-    config.wasm_function_references(true);
-    config.memory_may_move(false);
-    config.memory_reservation(64 << 10);
-    config.memory_reservation_for_growth(0);
-    let engine = Engine::new(&config)?;
-    let mut store = Store::new(&engine, ());
-
-    let module = Module::new(
-        store.engine(),
-        r#"
-            (module
-                (type $a (array i31ref))
-                (table 100 (ref $a) (array.new_default $a (i32.const 100000)))
-            )
-        "#,
-    )?;
-
-    Instance::new(&mut store, &module, &[])
-        .unwrap_err()
-        .downcast::<GcHeapOutOfMemory<()>>()?;
-
-    Ok(())
-}
-
-#[test]
-#[cfg_attr(miri, ignore)]
 fn instantiate_global_init_oom() -> Result<()> {
     let mut config = Config::new();
     config.wasm_gc(true);
@@ -1711,7 +1599,7 @@ fn instantiate_global_init_oom() -> Result<()> {
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn array_new_elem_oom() -> Result<()> {
+fn elem_const_eval_oom() -> Result<()> {
     let mut config = Config::new();
     config.wasm_gc(true);
     config.wasm_function_references(true);
@@ -1725,78 +1613,98 @@ fn array_new_elem_oom() -> Result<()> {
         store.engine(),
         r#"
             (module
-                (type $a (array (mut arrayref)))
-                (type $i (array i31ref))
-
-                (func (export "run")
-                    i32.const 0
-                    i32.const 5
-                    array.new_elem $a $e
-                    drop)
-
-                (elem $e arrayref
-                    (array.new_default $i (i32.const 100))
-                    (array.new_default $i (i32.const 10000))
-                    (array.new_default $i (i32.const 10000))
-                    (array.new_default $i (i32.const 10000))
-                    (array.new_default $i (i32.const 1000000))
+                (type $a (array i31ref))
+                (elem arrayref
+                    (array.new_default $a (i32.const 100))
+                    (array.new_default $a (i32.const 10000))
+                    (array.new_default $a (i32.const 10000))
+                    (array.new_default $a (i32.const 10000))
+                    (array.new_default $a (i32.const 1000000))
                 )
             )
         "#,
     )?;
 
-    let instance = Instance::new(&mut store, &module, &[])?;
-    let func = instance.get_typed_func::<(), ()>(&mut store, "run")?;
-    func.call(&mut store, ())
+    Instance::new(&mut store, &module, &[])
         .unwrap_err()
         .downcast::<GcHeapOutOfMemory<()>>()?;
 
     Ok(())
 }
 
+// The result of a `select` instruction with a GC reference type should be
+// declared as needing a stack map.
 #[test]
 #[cfg_attr(miri, ignore)]
-fn array_init_elem_oom() -> Result<()> {
-    let mut config = Config::new();
-    config.wasm_gc(true);
-    config.wasm_function_references(true);
-    config.memory_may_move(false);
-    config.memory_reservation(64 << 10);
-    config.memory_reservation_for_growth(0);
-    let engine = Engine::new(&config)?;
-    let mut store = Store::new(&engine, ());
+fn select_gc_ref_stack_map() -> Result<()> {
+    let _ = env_logger::try_init();
 
+    let mut config = Config::new();
+    config.wasm_function_references(true);
+    config.wasm_gc(true);
+    // Use pooling allocator with a tiny GC heap so that GC is triggered
+    // frequently and freed memory is reused quickly.
+    let mut pool = crate::small_pool_config();
+    pool.max_memory_size(1 << 16); // 64 KiB
+    config.allocation_strategy(pool);
+
+    let engine = Engine::new(&config)?;
     let module = Module::new(
-        store.engine(),
+        &engine,
         r#"
             (module
-                (type $a (array (mut arrayref)))
-                (type $i (array i31ref))
+                (type $pair (struct (field (mut i32))))
+                (type $arr (array (mut i8)))
 
-                (func (export "run")
-                    i32.const 5
-                    array.new_default $a
-                    i32.const 0
-                    i32.const 0
-                    i32.const 5
-                    array.init_elem $a $e)
+                ;; Allocate many objects to fill the GC heap and trigger
+                ;; collection. After GC frees everything, subsequent
+                ;; allocations reuse the freed memory.
+                (func $force_gc
+                    (local i32)
+                    (local.set 0 (i32.const 64))
+                    (loop $l
+                        (drop (array.new $arr (i32.const 0) (i32.const 1024)))
+                        (local.set 0 (i32.sub (local.get 0) (i32.const 1)))
+                        (br_if $l (local.get 0))
+                    )
+                )
 
-                (elem $e arrayref
-                    (array.new_default $i (i32.const 100))
-                    (array.new_default $i (i32.const 10000))
-                    (array.new_default $i (i32.const 10000))
-                    (array.new_default $i (i32.const 10000))
-                    (array.new_default $i (i32.const 1000000))
+                (func (export "test") (param $cond i32) (result i32)
+                    ;; The select result stays on the Wasm operand stack (never
+                    ;; stored in a local variable). If the new SSA value created
+                    ;; by select is not declared for stack maps, the GC will
+                    ;; free it.
+                    (select (result (ref null $pair))
+                        (struct.new $pair (i32.const 111))
+                        (ref.null $pair)
+                        (local.get $cond)
+                    )
+
+                    ;; This call is a safepoint. The select result is live
+                    ;; across it. The called function triggers GC which will
+                    ;; free the struct if it is incorrectly omitted from the
+                    ;; safepoint's stack map, and the new allocations would
+                    ;; overwrite the freed memory.
+                    (call $force_gc)
+
+                    ;; Use the select result. If it was incorrectly freed, then
+                    ;; this will have the wrong value.
+                    (struct.get $pair 0)
                 )
             )
         "#,
     )?;
 
+    let mut store = Store::new(&engine, ());
     let instance = Instance::new(&mut store, &module, &[])?;
-    let func = instance.get_typed_func::<(), ()>(&mut store, "run")?;
-    func.call(&mut store, ())
-        .unwrap_err()
-        .downcast::<GcHeapOutOfMemory<()>>()?;
+    let test = instance.get_typed_func::<(i32,), i32>(&mut store, "test")?;
+
+    // Run multiple times to increase chance of triggering GC at the right
+    // moment.
+    for _ in 0..30 {
+        let result = test.call(&mut store, (1,))?;
+        assert_eq!(result, 111);
+    }
 
     Ok(())
 }

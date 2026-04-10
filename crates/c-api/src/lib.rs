@@ -20,6 +20,8 @@ pub use wasmtime;
 mod config;
 mod engine;
 mod error;
+#[cfg(feature = "gc")]
+mod exn;
 mod r#extern;
 mod func;
 mod global;
@@ -29,10 +31,12 @@ mod memory;
 mod module;
 #[cfg(feature = "profiling")]
 mod profiling;
+#[cfg(feature = "gc")]
 mod r#ref;
 mod sharedmemory;
 mod store;
 mod table;
+mod tag;
 mod trap;
 mod types;
 mod val;
@@ -41,6 +45,8 @@ mod vec;
 pub use crate::config::*;
 pub use crate::engine::*;
 pub use crate::error::*;
+#[cfg(feature = "gc")]
+pub use crate::exn::*;
 pub use crate::r#extern::*;
 pub use crate::func::*;
 pub use crate::global::*;
@@ -48,9 +54,11 @@ pub use crate::instance::*;
 pub use crate::linker::*;
 pub use crate::memory::*;
 pub use crate::module::*;
+#[cfg(feature = "gc")]
 pub use crate::r#ref::*;
 pub use crate::store::*;
 pub use crate::table::*;
+pub use crate::tag::*;
 pub use crate::trap::*;
 pub use crate::types::*;
 pub use crate::val::*;

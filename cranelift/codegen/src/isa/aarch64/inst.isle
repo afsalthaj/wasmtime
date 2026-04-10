@@ -1822,6 +1822,9 @@
 (decl pure use_fp16 () bool)
 (extern constructor use_fp16 use_fp16)
 
+(decl pure use_csdb () bool)
+(extern constructor use_csdb use_csdb)
+
 ;; Extractor helpers for various immediate constants ;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (decl pure partial move_wide_const_from_u64 (Type u64) MoveWideConst)
@@ -3618,23 +3621,17 @@
 ;; are zero-extending the value.
 (rule 3 (imm (integral_ty ty) (ImmExtend.Zero) k)
       (if-let n (move_wide_const_from_u64 ty k))
-      (add_range_fact
-       (movz n (operand_size ty))
-       64 k k))
+      (movz n (operand_size ty)))
 (rule 2 (imm (integral_ty (ty_32_or_64 ty)) (ImmExtend.Zero) k)
       (if-let n (move_wide_const_from_inverted_u64 ty k))
-      (add_range_fact
-       (movn n (operand_size ty))
-       64 k k))
+      (movn n (operand_size ty)))
 
 ;; Weird logical-instruction immediate in ORI using zero register; to simplify,
 ;; we only match when we are zero-extending the value.
 (rule 1 (imm (integral_ty ty) (ImmExtend.Zero) k)
       (if-let n (imm_logic_from_u64 ty k))
       (if-let m (imm_size_from_type ty))
-      (add_range_fact
-       (orr_imm ty (zero_reg) n)
-       m k k))
+      (orr_imm ty (zero_reg) n))
 
 (decl load_constant_full (Type ImmExtend OperandSize u64) Reg)
 (extern constructor load_constant_full load_constant_full)
@@ -3957,11 +3954,11 @@
 ;; Note that this can additionally bundle an extending operation but the
 ;; extension must happen before the shift. This will pattern-match the shift
 ;; first and then if that succeeds afterwards try to find an extend.
-(rule 6 (amode_no_more_iconst ty (iadd _ x (ishl _ y (iconst _ (u64_from_imm64 n)))) offset)
-        (if-let true (u64_eq (ty_bytes ty) (u64_wrapping_shl 1 (shift_masked_imm ty n))))
+(rule 6 (amode_no_more_iconst ty (iadd _ x (ishl shift_ty y (iconst _ (u64_from_imm64 n)))) offset)
+        (if-let true (u64_eq (ty_bytes ty) (u64_wrapping_shl 1 (shift_masked_imm shift_ty n))))
         (amode_reg_scaled (amode_add x offset) y))
-(rule 7 (amode_no_more_iconst ty (iadd _ (ishl _ y (iconst _ (u64_from_imm64 n))) x) offset)
-        (if-let true (u64_eq (ty_bytes ty) (u64_wrapping_shl 1 (shift_masked_imm ty n))))
+(rule 7 (amode_no_more_iconst ty (iadd _ (ishl shift_ty y (iconst _ (u64_from_imm64 n))) x) offset)
+        (if-let true (u64_eq (ty_bytes ty) (u64_wrapping_shl 1 (shift_masked_imm shift_ty n))))
         (amode_reg_scaled (amode_add x offset) y))
 
 (decl amode_reg_scaled (Reg Value) AMode)
@@ -4115,13 +4112,13 @@
 ;; as it will make it easier to create the immediates in the instructions below.
 (rule 5 (splat_const (u64_replicated_u32 n) (VectorSize.Size64x2))
         (splat_const n (VectorSize.Size32x4)))
-(rule 5 (splat_const (u32_replicated_u16 n) (VectorSize.Size32x4))
+(rule 5 (splat_const (u32_from_u64 (u32_replicated_u16 n)) (VectorSize.Size32x4))
         (splat_const n (VectorSize.Size16x8)))
-(rule 5 (splat_const (u32_replicated_u16 n) (VectorSize.Size32x2))
+(rule 5 (splat_const (u32_from_u64 (u32_replicated_u16 n)) (VectorSize.Size32x2))
         (splat_const n (VectorSize.Size16x4)))
-(rule 5 (splat_const (u16_replicated_u8 n) (VectorSize.Size16x8))
+(rule 5 (splat_const (u16_from_u64 (u16_replicated_u8 n)) (VectorSize.Size16x8))
         (splat_const n (VectorSize.Size8x16)))
-(rule 5 (splat_const (u16_replicated_u8 n) (VectorSize.Size16x4))
+(rule 5 (splat_const (u16_from_u64 (u16_replicated_u8 n)) (VectorSize.Size16x4))
         (splat_const n (VectorSize.Size8x8)))
 
 ;; Special cases for `vec_dup_imm` instructions where the input is either

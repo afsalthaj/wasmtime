@@ -31,6 +31,7 @@ add_capi_test(tests FILES
   export_type.cc
   extern_type.cc
   tag_type.cc
+  exception.cc
   func.cc
   component/instantiate.cc
   component/define_module.cc
@@ -39,6 +40,8 @@ add_capi_test(tests FILES
   component/values.cc
   component/linker.cc
   component/types.cc
+  component/async.cc
+  async.cc
   error.cc
   config.cc
   wat.cc
@@ -48,6 +51,7 @@ add_capi_test(tests FILES
   wasi.cc
   store.cc
   val.cc
+  gc.cc
   table.cc
   global.cc
   memory.cc

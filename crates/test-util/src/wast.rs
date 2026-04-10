@@ -112,6 +112,7 @@ fn add_tests(tests: &mut Vec<WastTest>, path: &Path, config: &FindConfig) -> Res
 fn spec_test_config(test: &Path) -> TestConfig {
     let mut ret = TestConfig::default();
     ret.spec_test = Some(true);
+    ret.bulk_memory = Some(true);
     match spec_proposal_from_path(test) {
         Some("wide-arithmetic") => {
             ret.wide_arithmetic = Some(true);
@@ -248,6 +249,7 @@ impl fmt::Debug for WastTest {
 macro_rules! foreach_config_option {
     ($m:ident) => {
         $m! {
+            bulk_memory
             memory64
             custom_page_sizes
             multi_memory
@@ -367,7 +369,19 @@ impl Compiler {
     /// `Config::compiler_panicking_wasm_features`.
     pub fn should_fail(&self, config: &TestConfig) -> bool {
         match self {
-            Compiler::CraneliftNative => config.legacy_exceptions(),
+            Compiler::CraneliftNative => {
+                if config.legacy_exceptions() {
+                    return true;
+                }
+
+                // Stack-switching is only implemented on x86_64 for unix
+                // platforms right now.
+                if config.stack_switching() && !(cfg!(target_arch = "x86_64") && cfg!(unix)) {
+                    return true;
+                }
+
+                false
+            }
 
             Compiler::Winch => {
                 if config.gc()
@@ -455,9 +469,11 @@ impl WastTest {
 
         // Some tests are known to fail with the pooling allocator
         if config.pooling {
+            // allocates too much memory for the pooling configuration here
+            if self.config.hogs_memory() {
+                return true;
+            }
             let unsupported = [
-                // allocates too much memory for the pooling configuration here
-                "misc_testsuite/memory64/more-than-4gb.wast",
                 // shared memories + pooling allocator aren't supported yet
                 "misc_testsuite/memory-combos.wast",
                 "misc_testsuite/threads/atomics-end-of-memory.wast",
@@ -474,6 +490,7 @@ impl WastTest {
                 "spec_testsuite/proposals/threads/atomic.wast",
                 "spec_testsuite/proposals/threads/exports.wast",
                 "spec_testsuite/proposals/threads/memory.wast",
+                "misc_testsuite/memory64/threads.wast",
             ];
 
             if unsupported.iter().any(|part| self.path.ends_with(part)) {
@@ -502,20 +519,6 @@ impl WastTest {
                 "misc_testsuite/no-mixup-stack-maps.wast",
                 "misc_testsuite/no-panic.wast",
                 "misc_testsuite/simple_ref_is_null.wast",
-                "misc_testsuite/table_grow_with_funcref.wast",
-                "spec_testsuite/br_table.wast",
-                "spec_testsuite/global.wast",
-                "spec_testsuite/ref_func.wast",
-                "spec_testsuite/ref_is_null.wast",
-                "spec_testsuite/ref_null.wast",
-                "spec_testsuite/select.wast",
-                "spec_testsuite/table_fill.wast",
-                "spec_testsuite/table_get.wast",
-                "spec_testsuite/table_grow.wast",
-                "spec_testsuite/table_set.wast",
-                "spec_testsuite/table_size.wast",
-                "spec_testsuite/elem.wast",
-                "spec_testsuite/linking.wast",
             ];
 
             if unsupported.iter().any(|part| self.path.ends_with(part)) {
@@ -617,16 +620,6 @@ impl WastTest {
 
             #[cfg(target_arch = "x86_64")]
             {
-                let unsupported = [
-                    // externref/reference-types related
-                    // simd-related failures
-                    "misc_testsuite/simd/canonicalize-nan.wast",
-                ];
-
-                if unsupported.iter().any(|part| self.path.ends_with(part)) {
-                    return true;
-                }
-
                 // SIMD on Winch requires AVX instructions.
                 #[cfg(target_arch = "x86_64")]
                 if !(std::is_x86_feature_detected!("avx") && std::is_x86_feature_detected!("avx2"))
@@ -637,6 +630,7 @@ impl WastTest {
                         "misc_testsuite/int-to-float-splat.wast",
                         "misc_testsuite/issue6562.wast",
                         "misc_testsuite/simd/almost-extmul.wast",
+                        "misc_testsuite/simd/canonicalize-nan.wast",
                         "misc_testsuite/simd/cvt-from-uint.wast",
                         "misc_testsuite/simd/edge-of-memory.wast",
                         "misc_testsuite/simd/issue_3327_bnot_lowering.wast",
@@ -646,6 +640,7 @@ impl WastTest {
                         "misc_testsuite/simd/sse-cannot-fold-unaligned-loads.wast",
                         "misc_testsuite/winch/issue-10331.wast",
                         "misc_testsuite/winch/replace_lane.wast",
+                        "misc_testsuite/simd/riscv64-replicated-imm5-works.wast",
                         "spec_testsuite/simd_align.wast",
                         "spec_testsuite/simd_boolean.wast",
                         "spec_testsuite/simd_conversions.wast",

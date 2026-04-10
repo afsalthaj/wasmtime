@@ -6,6 +6,7 @@ use mutatis::{
     Candidates, Context, DefaultMutate, Generate, Mutate, Result as MutResult, mutators as m,
 };
 use smallvec::SmallVec;
+use std::collections::BTreeMap;
 
 /// Mutator for [`Types`]: handles adding/removing types and all rec-group
 /// structural mutations (duplicate, remove, merge, split, move).
@@ -13,7 +14,8 @@ use smallvec::SmallVec;
 pub struct TypesMutator;
 
 impl TypesMutator {
-    /// Add an empty struct type to a random existing rec group.
+    /// Add an empty struct in a random existing rec group, or create a rec group
+    /// and add there when `rec_groups` is empty (if `limits.max_rec_groups` allows).
     fn add_struct(
         &mut self,
         c: &mut Candidates<'_>,
@@ -21,18 +23,38 @@ impl TypesMutator {
         limits: &GcOpsLimits,
     ) -> mutatis::Result<()> {
         if c.shrink()
-            || types.rec_groups.is_empty()
             || types.type_defs.len()
                 >= usize::try_from(limits.max_types).expect("max_types is too large")
         {
             return Ok(());
         }
+
+        let max_rec_groups =
+            usize::try_from(limits.max_rec_groups).expect("max_rec_groups is too large");
+        if types.rec_groups.is_empty() && max_rec_groups == 0 {
+            return Ok(());
+        }
+
         c.mutation(|ctx| {
-            let Some(gid) = ctx.rng().choose(types.rec_groups.keys()).copied() else {
-                return Ok(());
+            let gid = if types.rec_groups.is_empty() {
+                let new_gid = types.fresh_rec_group_id(ctx.rng());
+                types.insert_rec_group(new_gid);
+                new_gid
+            } else {
+                let Some(gid) = ctx.rng().choose(types.rec_groups.keys()).copied() else {
+                    return Ok(());
+                };
+                gid
             };
+
             let tid = types.fresh_type_id(ctx.rng());
-            types.insert_empty_struct(tid, gid);
+            let is_final = (ctx.rng().gen_u32() % 4) == 0;
+            let supertype = if (ctx.rng().gen_u32() % 4) == 0 {
+                ctx.rng().choose(types.type_defs.keys()).copied()
+            } else {
+                None
+            };
+            types.insert_empty_struct(tid, gid, is_final, supertype);
             log::debug!("Added empty struct {tid:?} to rec group {gid:?}");
             Ok(())
         })?;
@@ -189,22 +211,49 @@ impl TypesMutator {
             let Some(src_gid) = ctx.rng().choose(types.rec_groups.keys()).copied() else {
                 return Ok(());
             };
-            let Some(count) = types.rec_groups.get(&src_gid).map(|s| s.len()) else {
+            let Some(src_members) = types.rec_groups.get(&src_gid) else {
                 return Ok(());
             };
-            if count == 0 {
+            if src_members.is_empty() {
                 return Ok(());
             }
 
+            // Collect (TypeId, is_final, supertype) for members of the source group.
+            let members: SmallVec<[(TypeId, bool, Option<TypeId>); 32]> = src_members
+                .iter()
+                .filter_map(|tid| {
+                    types
+                        .type_defs
+                        .get(tid)
+                        .map(|def| (*tid, def.is_final, def.supertype))
+                })
+                .collect();
+
+            if members.is_empty() {
+                return Ok(());
+            }
+
+            // Create a new rec group.
             let new_gid = types.fresh_rec_group_id(ctx.rng());
             types.insert_rec_group(new_gid);
 
-            for _ in 0..count {
-                let tid = types.fresh_type_id(ctx.rng());
-                types.insert_empty_struct(tid, new_gid);
+            // Allocate fresh type ids for each member and build old-to-new map.
+            let mut old_to_new: BTreeMap<TypeId, TypeId> = BTreeMap::new();
+            for (old_tid, _, _) in &members {
+                old_to_new.insert(*old_tid, types.fresh_type_id(ctx.rng()));
             }
 
-            log::debug!("Duplicated rec group {src_gid:?} as {new_gid:?} ({count} types)");
+            // Insert duplicated defs, rewriting intra-group supertype edges to cloned ids.
+            for (old_tid, is_final, supertype) in &members {
+                let new_tid = old_to_new[old_tid];
+                let mapped_super = supertype.map(|st| *old_to_new.get(&st).unwrap_or(&st));
+                types.insert_empty_struct(new_tid, new_gid, *is_final, mapped_super);
+            }
+
+            log::debug!(
+                "Duplicated rec group {src_gid:?} as {new_gid:?} ({count} types)",
+                count = members.len()
+            );
             Ok(())
         })?;
         Ok(())

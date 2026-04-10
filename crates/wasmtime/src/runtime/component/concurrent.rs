@@ -142,7 +142,6 @@ impl Status {
 #[derive(Clone, Copy, Debug)]
 enum Event {
     None,
-    Cancelled,
     Subtask {
         status: Status,
     },
@@ -162,6 +161,7 @@ enum Event {
         code: ReturnCode,
         pending: Option<(TypeFutureTableIndex, u32)>,
     },
+    Cancelled,
 }
 
 impl Event {
@@ -1450,7 +1450,7 @@ impl StoreOpaque {
     ) -> Result<()> {
         log::trace!("enter sync call {callee:?}");
         if !self.concurrency_support() {
-            return Ok(self.enter_call_not_concurrent());
+            return self.enter_call_not_concurrent();
         }
 
         let state = self.concurrent_state_mut();
@@ -1548,7 +1548,7 @@ impl StoreOpaque {
     /// situations.
     pub(crate) fn host_task_create(&mut self) -> Result<Option<TableId<HostTask>>> {
         if !self.concurrency_support() {
-            self.enter_call_not_concurrent();
+            self.enter_call_not_concurrent()?;
             return Ok(None);
         }
         let state = self.concurrent_state_mut();
@@ -2289,7 +2289,7 @@ impl Instance {
 
                         let state = store.concurrent_state_mut();
                         if !state.get_mut(guest_thread.task)?.result.is_none() {
-                            bail_bug!("task has not yet produced a result");
+                            bail_bug!("task has already produced a result");
                         }
 
                         match state.get_mut(guest_thread.task)?.lift_result.take() {
@@ -3058,13 +3058,21 @@ impl Instance {
 
         log::trace!("drop waitable set {rep} (handle {set})");
 
-        let set = store
+        // Note that we're careful to check for waiters _before_ deleting the
+        // set to avoid dropping any waiters in `WaitMode::Fiber(_)`, which
+        // would panic.  See `drop-waitable-set-with-waiters.wast` for details.
+        if !store
             .concurrent_state_mut()
-            .delete(TableId::<WaitableSet>::new(rep))?;
-
-        if !set.waiting.is_empty() {
+            .get_mut(TableId::<WaitableSet>::new(rep))?
+            .waiting
+            .is_empty()
+        {
             bail!(Trap::WaitableSetDropHasWaiters);
         }
+
+        store
+            .concurrent_state_mut()
+            .delete(TableId::<WaitableSet>::new(rep))?;
 
         Ok(())
     }
@@ -3137,7 +3145,7 @@ impl Instance {
                 (
                     Waitable::Guest(id),
                     thread,
-                    concurrent_state.get_mut(id)?.exited,
+                    concurrent_state.get_mut(id)?.ready_to_delete(),
                 )
             } else {
                 bail_bug!("expected guest caller for `subtask.drop`")
@@ -5150,27 +5158,27 @@ impl ConcurrentState {
     ///
     /// The `task` is bit-packed as returned by `current_call_context_scope_id`
     /// below.
-    pub fn call_context(&mut self, task: u32) -> &mut CallContext {
+    pub fn call_context(&mut self, task: u32) -> Result<&mut CallContext> {
         let (task, is_host) = (task >> 1, task & 1 == 1);
         if is_host {
             let task: TableId<HostTask> = TableId::new(task);
-            &mut self.get_mut(task).unwrap().call_context
+            Ok(&mut self.get_mut(task)?.call_context)
         } else {
             let task: TableId<GuestTask> = TableId::new(task);
-            &mut self.get_mut(task).unwrap().call_context
+            Ok(&mut self.get_mut(task)?.call_context)
         }
     }
 
     /// Used by `ResourceTables` to record the scope of a borrow to get undone
     /// in the future.
-    pub fn current_call_context_scope_id(&self) -> u32 {
+    pub fn current_call_context_scope_id(&self) -> Result<u32> {
         let (bits, is_host) = match self.current_thread {
             CurrentThread::Guest(id) => (id.task.rep(), false),
             CurrentThread::Host(id) => (id.rep(), true),
-            CurrentThread::None => unreachable!(),
+            CurrentThread::None => bail_bug!("current thread is not set"),
         };
         assert_eq!((bits << 1) >> 1, bits);
-        (bits << 1) | u32::from(is_host)
+        Ok((bits << 1) | u32::from(is_host))
     }
 
     fn current_guest_thread(&self) -> Result<QualifiedThreadId> {

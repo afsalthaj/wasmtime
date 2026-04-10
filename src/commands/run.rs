@@ -30,8 +30,6 @@ use wasmtime_wasi_keyvalue::{WasiKeyValue, WasiKeyValueCtx, WasiKeyValueCtxBuild
 use wasmtime_wasi_nn::wit::WasiNnView;
 #[cfg(feature = "wasi-threads")]
 use wasmtime_wasi_threads::WasiThreadsCtx;
-#[cfg(feature = "wasi-tls")]
-use wasmtime_wasi_tls::{WasiTls, WasiTlsCtx};
 
 fn parse_preloads(s: &str) -> Result<(String, PathBuf)> {
     let parts: Vec<&str> = s.splitn(2, '=').collect();
@@ -398,7 +396,10 @@ impl RunCommand {
     }
 
     #[cfg(feature = "debug")]
-    fn add_debugger_api(&mut self, linker: &mut wasmtime::component::Linker<Host>) -> Result<()> {
+    pub(crate) fn add_debugger_api(
+        &mut self,
+        linker: &mut wasmtime::component::Linker<Host>,
+    ) -> Result<()> {
         wasmtime_debugger::add_to_linker(linker, |x| x.ctx().table)?;
         Ok(())
     }
@@ -512,7 +513,7 @@ impl RunCommand {
         Ok(instance)
     }
 
-    fn compute_argv(&self) -> Result<Vec<String>> {
+    pub(crate) fn compute_argv(&self) -> Result<Vec<String>> {
         let mut result = Vec::new();
 
         for (i, arg) in self.module_and_args.iter().enumerate() {
@@ -900,10 +901,15 @@ impl RunCommand {
         }
     }
 
+    /// Invoke a debugger component with a debuggee.
+    ///
+    /// The debugger runs in `store` (using run's `Host`), while the
+    /// debuggee wraps an arbitrary store type `T` and body closure.
     #[cfg(feature = "debug")]
-    async fn invoke_debugger<
+    pub(crate) async fn invoke_debugger<
+        T: Send + 'static,
         F: for<'a> FnOnce(
-                &'a mut Store<Host>,
+                &'a mut Store<T>,
             ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>
             + Send
             + 'static,
@@ -912,7 +918,7 @@ impl RunCommand {
         store: &mut Store<Host>,
         component: &wasmtime::component::Component,
         linker: &mut wasmtime::component::Linker<Host>,
-        debuggee_host: Store<Host>,
+        debuggee_host: Store<T>,
         body: F,
     ) -> Result<()> {
         let instance = linker.instantiate_async(&mut *store, component).await?;
@@ -1317,16 +1323,14 @@ impl RunCommand {
                         bail!("Cannot enable wasi-tls for core wasm modules");
                     }
                     CliLinker::Component(linker) => {
-                        let mut opts = wasmtime_wasi_tls::LinkOptions::default();
+                        let mut opts = wasmtime_wasi_tls::p2::LinkOptions::default();
                         opts.tls(true);
-                        wasmtime_wasi_tls::add_to_linker(linker, &mut opts, |h| {
-                            let ctx = h.wasip1_ctx.as_mut().expect("wasi is not configured");
-                            let ctx = Arc::get_mut(ctx).unwrap().get_mut().unwrap();
-                            WasiTls::new(
-                                Arc::get_mut(h.wasi_tls.as_mut().unwrap()).unwrap(),
-                                ctx.ctx().table,
-                            )
-                        })?;
+                        wasmtime_wasi_tls::p2::add_to_linker(linker, &opts)?;
+
+                        #[cfg(feature = "component-model-async")]
+                        if self.run.common.wasi.p3.unwrap_or(crate::common::P3_DEFAULT) {
+                            wasmtime_wasi_tls::p3::add_to_linker(linker)?;
+                        }
 
                         let ctx = wasmtime_wasi_tls::WasiTlsCtxBuilder::new().build();
                         store.data_mut().wasi_tls = Some(Arc::new(ctx));
@@ -1497,7 +1501,7 @@ pub struct Host {
     #[cfg(feature = "wasi-keyvalue")]
     wasi_keyvalue: Option<Arc<WasiKeyValueCtx>>,
     #[cfg(feature = "wasi-tls")]
-    wasi_tls: Option<Arc<WasiTlsCtx>>,
+    wasi_tls: Option<Arc<wasmtime_wasi_tls::WasiTlsCtx>>,
 }
 
 impl Host {
@@ -1542,6 +1546,16 @@ impl wasmtime_wasi_http::p3::WasiHttpView for Host {
             table: WasiView::ctx(unwrap_singlethread_context(&mut self.wasip1_ctx)).table,
             ctx,
             hooks: &mut self.wasi_http_hooks,
+        }
+    }
+}
+
+#[cfg(all(feature = "wasi-tls"))]
+impl wasmtime_wasi_tls::WasiTlsView for Host {
+    fn tls(&mut self) -> wasmtime_wasi_tls::WasiTlsCtxView<'_> {
+        wasmtime_wasi_tls::WasiTlsCtxView {
+            table: WasiView::ctx(unwrap_singlethread_context(&mut self.wasip1_ctx)).table,
+            ctx: Arc::get_mut(self.wasi_tls.as_mut().unwrap()).unwrap(),
         }
     }
 }

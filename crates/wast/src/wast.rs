@@ -171,7 +171,7 @@ impl WastContext {
             return Ok(Export::Core(
                 self.core_linker
                     .get(&mut self.core_store, module, name)
-                    .ok_or_else(|| format_err!("no item named `{module}::{name}` found"))?,
+                    .with_context(|| format_err!("no item named `{module}::{name}` found"))?,
             ));
         }
 
@@ -233,6 +233,17 @@ impl WastContext {
         link_spectest(&mut self.core_linker, &mut self.core_store, config)?;
         #[cfg(feature = "component-model")]
         link_component_spectest(&mut self.component_linker)?;
+        Ok(())
+    }
+
+    /// Register the "wasmtime" module, which provides utilities that our misc
+    /// tests use.
+    pub fn register_wasmtime(&mut self) -> Result<()> {
+        self.core_linker
+            .func_wrap("wasmtime", "gc", |mut caller: Caller<_>| {
+                caller.gc(None)?;
+                Ok(())
+            })?;
         Ok(())
     }
 

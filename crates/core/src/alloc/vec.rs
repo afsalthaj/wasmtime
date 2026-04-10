@@ -191,6 +191,20 @@ impl<T> TryVec<T> {
         Ok(())
     }
 
+    /// Same as [`std::vec::Vec::resize_with`] but returns an error on
+    /// allocation failure.
+    pub fn resize_with<F>(&mut self, new_len: usize, f: F) -> Result<(), OutOfMemory>
+    where
+        F: FnMut() -> T,
+    {
+        let len = self.len();
+        if new_len > len {
+            self.reserve(new_len - len)?;
+        }
+        self.inner.resize_with(new_len, f);
+        Ok(())
+    }
+
     /// Same as [`std::vec::Vec::retain`].
     pub fn retain<F>(&mut self, f: F)
     where
@@ -308,6 +322,17 @@ impl<T> TryVec<T> {
     /// Same as [`std::vec::Vec::clear`].
     pub fn clear(&mut self) {
         self.inner.clear();
+    }
+
+    /// Same as [`std::vec::Vec::as_mut_ptr`].
+    //
+    // Note that this is technically inherited through the `DerefMut` impl but
+    // that converts `&mut Self` to `&mut [T]` which invalidates all previously
+    // derived pointers. This causes problems in Miri so by having an inherent
+    // method here it means that the borrow scope matches what we want with
+    // Miri.
+    pub fn as_mut_ptr(&mut self) -> *mut T {
+        self.inner.as_mut_ptr()
     }
 }
 

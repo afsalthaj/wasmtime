@@ -1,5 +1,4 @@
 use std::ptr::NonNull;
-use std::thread;
 use wasmtime::Result;
 use wasmtime::component::{self, Component};
 use wasmtime::{
@@ -147,7 +146,7 @@ fn pulley_provenance_test() -> Result<()> {
                 .unwrap()
                 .unwrap();
             assert_eq!(caller_func.as_u32(), 3);
-            assert_eq!(pc, 418);
+            assert_eq!(pc.raw(), 418);
             let parent_frame = caller_frame.parent(&mut caller).unwrap();
             assert!(parent_frame.is_none());
 
@@ -415,15 +414,6 @@ fn pulley_provenance_test_components() -> Result<()> {
     Ok(())
 }
 
-async fn sleep(duration: std::time::Duration) {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    thread::spawn(move || {
-        thread::sleep(duration);
-        tx.send(()).unwrap();
-    });
-    rx.await.unwrap()
-}
-
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn pulley_provenance_test_async_components() -> Result<()> {
@@ -445,12 +435,16 @@ async fn pulley_provenance_test_async_components() -> Result<()> {
     {
         let mut store = Store::new(&engine, ());
         let mut linker = component::Linker::new(&engine);
-        linker.root().func_wrap_concurrent("sleep", |_, ()| {
-            Box::pin(async {
-                sleep(std::time::Duration::from_millis(10)).await;
-                Ok(())
-            })
-        })?;
+        linker
+            .root()
+            .func_wrap_concurrent("return-slowly", |_, ()| {
+                Box::pin(async {
+                    for _ in 0..5 {
+                        tokio::task::yield_now().await;
+                    }
+                    Ok(())
+                })
+            })?;
 
         let instance = linker.instantiate_async(&mut store, &component).await?;
 
@@ -476,6 +470,13 @@ async fn pulley_provenance_test_async_components() -> Result<()> {
             .await??;
 
         let run = instance.get_typed_func::<(), ()>(&mut store, "run-stackful-stackful")?;
+        store
+            .run_concurrent(async move |accessor| {
+                wasmtime::error::Ok(run.call_concurrent(accessor, ()).await?)
+            })
+            .await??;
+
+        let run = instance.get_typed_func::<(), ()>(&mut store, "intra-component-stream")?;
         store
             .run_concurrent(async move |accessor| {
                 wasmtime::error::Ok(run.call_concurrent(accessor, ()).await?)

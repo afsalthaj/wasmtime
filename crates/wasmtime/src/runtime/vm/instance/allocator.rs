@@ -6,14 +6,15 @@ use crate::runtime::vm::memory::Memory;
 use crate::runtime::vm::mpk::ProtectionKey;
 use crate::runtime::vm::table::Table;
 use crate::runtime::vm::{CompiledModuleId, ModuleRuntimeInfo};
-use crate::store::{Asyncness, InstanceId, StoreOpaque, StoreResourceLimiter};
+use crate::store::{Asyncness, AutoAssertNoGc, InstanceId, StoreOpaque, StoreResourceLimiter};
 use crate::{OpaqueRootScope, Val};
 use core::future::Future;
 use core::pin::Pin;
 use core::{mem, ptr};
 use wasmtime_environ::{
-    DefinedMemoryIndex, DefinedTableIndex, HostPtr, InitMemory, MemoryInitialization,
-    MemoryInitializer, Module, SizeOverflow, TableInitialValue, Trap, VMOffsets,
+    DefinedMemoryIndex, DefinedTableIndex, EntityRef, HostPtr, InitMemory, MemoryInitialization,
+    MemoryInitializer, Module, NeedsGcRooting, SizeOverflow, TableInitialValue,
+    TableSegmentElements, Trap, VMOffsets,
 };
 
 #[cfg(feature = "gc")]
@@ -193,10 +194,7 @@ pub unsafe trait InstanceAllocator: Send + Sync {
         request: &'a mut InstanceAllocationRequest<'b, 'c>,
         ty: &'a wasmtime_environ::Memory,
         memory_index: Option<DefinedMemoryIndex>,
-    ) -> Result<
-        Pin<Box<dyn Future<Output = Result<(MemoryAllocationIndex, Memory)>> + Send + 'a>>,
-        OutOfMemory,
-    >;
+    ) -> Pin<Box<dyn Future<Output = Result<(MemoryAllocationIndex, Memory)>> + Send + 'a>>;
 
     /// Deallocate an instance's previously allocated memory.
     ///
@@ -221,10 +219,7 @@ pub unsafe trait InstanceAllocator: Send + Sync {
         req: &'a mut InstanceAllocationRequest<'b, 'c>,
         table: &'a wasmtime_environ::Table,
         table_index: DefinedTableIndex,
-    ) -> Result<
-        Pin<Box<dyn Future<Output = Result<(TableAllocationIndex, Table)>> + Send + 'a>>,
-        OutOfMemory,
-    >;
+    ) -> Pin<Box<dyn Future<Output = Result<(TableAllocationIndex, Table)>> + Send + 'a>>;
 
     /// Deallocate an instance's previously allocated table.
     ///
@@ -404,9 +399,9 @@ impl dyn InstanceAllocator + '_ {
 
     /// Allocate the memories for the given instance allocation request, pushing
     /// them into `memories`.
-    async fn allocate_memories<'a, 'b: 'a, 'c: 'a>(
-        &'a self,
-        request: &'a mut InstanceAllocationRequest<'b, 'c>,
+    async fn allocate_memories(
+        &self,
+        request: &mut InstanceAllocationRequest<'_, '_>,
         memories: &mut TryPrimaryMap<DefinedMemoryIndex, (MemoryAllocationIndex, Memory)>,
     ) -> Result<()> {
         let module = request.runtime_info.env_module();
@@ -422,7 +417,7 @@ impl dyn InstanceAllocator + '_ {
                 .expect("should be a defined memory since we skipped imported ones");
 
             let memory = self
-                .allocate_memory(request, ty, Some(memory_index))?
+                .allocate_memory(request, ty, Some(memory_index))
                 .await?;
             memories.push(memory)?;
         }
@@ -457,9 +452,9 @@ impl dyn InstanceAllocator + '_ {
 
     /// Allocate tables for the given instance allocation request, pushing them
     /// into `tables`.
-    async fn allocate_tables<'a, 'b: 'a, 'c: 'a>(
-        &'a self,
-        request: &'a mut InstanceAllocationRequest<'b, 'c>,
+    async fn allocate_tables(
+        &self,
+        request: &mut InstanceAllocationRequest<'_, '_>,
         tables: &mut TryPrimaryMap<DefinedTableIndex, (TableAllocationIndex, Table)>,
     ) -> Result<()> {
         let module = request.runtime_info.env_module();
@@ -474,7 +469,7 @@ impl dyn InstanceAllocator + '_ {
                 .defined_table_index(index)
                 .expect("should be a defined table since we skipped imported ones");
 
-            let table = self.allocate_table(request, table, def_index)?.await?;
+            let table = self.allocate_table(request, table, def_index).await?;
             tables.push(table)?;
         }
 
@@ -514,16 +509,16 @@ fn check_table_init_bounds(
         let start = const_evaluator
             .eval_int(&mut store, context, &segment.offset)
             .expect("const expression should be valid");
-        let start = usize::try_from(start.unwrap_i32().cast_unsigned()).unwrap();
-        let end = start.checked_add(usize::try_from(segment.elements.len()).unwrap());
+        let start = get_index(start, module.tables[segment.table_index].idx_type);
+        let end = start.checked_add(segment.elements.len());
 
         let table = store.instance_mut(instance).get_table(segment.table_index);
         match end {
-            Some(end) if end <= table.size() => {
+            Some(end) if end <= u64::try_from(table.size())? => {
                 // Initializer is in bounds
             }
             _ => {
-                bail!("table out of bounds: elements segment does not fit")
+                bail!(Trap::TableOutOfBounds);
             }
         }
     }
@@ -553,7 +548,7 @@ async fn initialize_tables(
                 let table = store
                     .instance_mut(context.instance)
                     .get_exported_table(id, idx);
-                let size = table._size(&store);
+                let size = table.size_(&store);
                 table._fill(&mut store, 0, init.ref_().unwrap(), size)?;
             }
         }
@@ -570,23 +565,49 @@ async fn initialize_tables(
         let start = const_evaluator
             .eval_int(&mut store, context, &segment.offset)
             .expect("const expression should be valid");
-        let start = get_index(
-            start,
-            store.instance(context.instance).env_module().tables[segment.table_index].idx_type,
-        );
-        Instance::table_init_segment(
-            &mut store,
-            limiter.as_deref_mut(),
-            context.asyncness,
-            context.instance,
-            const_evaluator,
-            segment.table_index,
-            &segment.elements,
-            start,
-            0,
-            segment.elements.len(),
-        )
-        .await?;
+        let start = get_index(start, module.tables[segment.table_index].idx_type);
+
+        let end = start
+            .checked_add(segment.elements.len())
+            .ok_or_else(|| Trap::TableOutOfBounds)?;
+
+        let store_id = store.id();
+        let table = {
+            let instance = store.instance(context.instance);
+            instance.get_exported_table(store_id, segment.table_index)
+        };
+
+        if end > table.size_(&store) {
+            return Err(Trap::TableOutOfBounds.into());
+        }
+
+        let positions = start..end;
+
+        match &segment.elements {
+            TableSegmentElements::Functions(funcs) => {
+                for (i, func_idx) in positions.zip(funcs) {
+                    let func = {
+                        let (instance, registry) =
+                            store.instance_and_module_registry_mut(context.instance);
+                        // SAFETY: the `store_id` passed to `get_exported_func` is
+                        // indeed the store that owns the function.
+                        unsafe { instance.get_exported_func(registry, store_id, *func_idx) }
+                    };
+                    table.set_(&mut store, i, func.into())?;
+                }
+            }
+            TableSegmentElements::Expressions {
+                exprs,
+                needs_gc_rooting: _,
+            } => {
+                for (i, expr) in positions.zip(exprs) {
+                    let val = const_evaluator
+                        .eval(&mut store, limiter.as_deref_mut(), context, expr)
+                        .await?;
+                    table.set_(&mut store, i, val.ref_().unwrap())?;
+                }
+            }
+        }
     }
 
     Ok(())
@@ -636,7 +657,7 @@ fn check_memory_init_bounds(
                 // Initializer is in bounds
             }
             _ => {
-                bail!("memory out of bounds: data segment does not fit")
+                bail!(Trap::MemoryOutOfBounds);
             }
         }
     }
@@ -820,6 +841,69 @@ async fn initialize_globals(
     Ok(())
 }
 
+async fn initialize_passive_elements(
+    store: &mut StoreOpaque,
+    mut limiter: Option<&mut StoreResourceLimiter<'_>>,
+    context: &mut ConstEvalContext,
+    const_evaluator: &mut ConstExprEvaluator,
+    module: &Module,
+) -> Result<()> {
+    let store_id = store.id();
+
+    let instance = store.instance_mut(context.instance);
+    debug_assert!(instance.passive_elements.is_empty());
+    instance
+        .passive_elements_mut()
+        .reserve(module.passive_elements.len())?;
+
+    for (idx, segment) in &module.passive_elements {
+        match segment {
+            TableSegmentElements::Functions(func_indices) => {
+                let mut vals = TryVec::with_capacity(func_indices.len())?;
+                for func_idx in func_indices {
+                    let (instance, registry) =
+                        store.instance_and_module_registry_mut(context.instance);
+                    // SAFETY: `store_id` is for the store that owns this instance.
+                    let func = unsafe { instance.get_exported_func(registry, store_id, *func_idx) };
+                    vals.push(func.to_val_raw(store))?;
+                }
+                let instance = store.instance_mut(context.instance);
+                debug_assert_eq!(instance.passive_elements.len(), idx.index());
+                instance
+                    .passive_elements_mut()
+                    .push(Some((NeedsGcRooting::No, vals)))?;
+            }
+            TableSegmentElements::Expressions {
+                needs_gc_rooting,
+                exprs,
+            } => {
+                let mut vals = TryVec::with_capacity(exprs.len())?;
+                for expr in exprs {
+                    let mut store = OpaqueRootScope::new(&mut *store);
+
+                    let val = const_evaluator
+                        .eval(&mut store, limiter.as_deref_mut(), context, expr)
+                        .await?;
+
+                    let mut store = AutoAssertNoGc::new(&mut store);
+                    vals.push(val.to_raw_(&mut store)?)?;
+                }
+                let instance = store.instance_mut(context.instance);
+                debug_assert_eq!(instance.passive_elements.len(), idx.index());
+                instance
+                    .passive_elements_mut()
+                    .push(Some((*needs_gc_rooting, vals)))?;
+            }
+        }
+    }
+
+    debug_assert_eq!(
+        module.passive_elements.len(),
+        store.instance(context.instance).passive_elements.len()
+    );
+    Ok(())
+}
+
 pub async fn initialize_instance(
     store: &mut StoreOpaque,
     mut limiter: Option<&mut StoreResourceLimiter<'_>>,
@@ -847,6 +931,7 @@ pub async fn initialize_instance(
         module,
     )
     .await?;
+
     initialize_tables(
         store,
         limiter.as_deref_mut(),
@@ -855,7 +940,13 @@ pub async fn initialize_instance(
         module,
     )
     .await?;
+
     initialize_memories(store, &mut context, &mut const_evaluator, &module)?;
+
+    if is_bulk_memory {
+        initialize_passive_elements(store, limiter, &mut context, &mut const_evaluator, &module)
+            .await?;
+    }
 
     Ok(())
 }
