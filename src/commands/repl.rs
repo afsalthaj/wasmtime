@@ -107,7 +107,7 @@ impl ReplCommand {
                 engine: engine.clone(),
                 component_id,
             });
-            let invoke = Arc::new(WasmtimeWorkerInvoke {
+            let invoke = Arc::new(WasmtimeComponentFunctionInvoke {
                 component,
                 instance,
                 store,
@@ -174,7 +174,7 @@ bail!(
     }
 }
 
-struct WasmtimeWorkerInvoke {
+struct WasmtimeComponentFunctionInvoke {
     component: Component,
     instance: Instance,
     store: Arc<Mutex<Store<Host>>>,
@@ -182,7 +182,7 @@ struct WasmtimeWorkerInvoke {
 }
 
 #[async_trait]
-impl ComponentFunctionInvoke for WasmtimeWorkerInvoke {
+impl ComponentFunctionInvoke for WasmtimeComponentFunctionInvoke {
     async fn invoke(
         &self,
         component_id: Uuid,
