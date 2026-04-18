@@ -19,20 +19,20 @@ use rib::{
     ComponentDependency, ComponentDependencyKey, ParsedFunctionName, ParsedFunctionSite, Value,
     ValueAndType,
 };
+use rib_repl::anyhow::{anyhow, bail, Result};
 use rib_repl::anyhow::Context as _;
-use rib_repl::anyhow::{Result, anyhow, bail};
 use rib_repl::rib;
 use rib_repl::uuid::Uuid;
 use rib_repl::{
     ComponentFunctionInvoke, ComponentSource, ReplComponentBundle, RibDependencyManager, RibRepl,
     RibReplConfig,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use wasmtime::component::types::{self, ComponentItem as CItem, Type as WType};
-use wasmtime::component::{Component, ComponentExportIndex, Func, Instance, Val};
+use wasmtime::component::{Component, ComponentExportIndex, Func, Instance, Linker, Val};
 use wasmtime::{Engine, Store};
 
 /// Start an interactive Rib REPL against a WebAssembly component.
@@ -81,7 +81,7 @@ impl ReplCommand {
 
             let engine = run_cmd.new_engine()?;
             let main = run_cmd.run.load_module(&engine, &wasm_path, None)?;
-            let (mut store, linker) = run_cmd.new_store_and_linker(&engine, &main)?;
+            let (store, linker) = run_cmd.new_store_and_linker(&engine, &main)?;
             let RunTarget::Component(component) = main else {
                 return Err(wasmtime::Error::msg(
                     "`wasmtime repl` expects a WebAssembly component, not a core module",
@@ -95,11 +95,6 @@ impl ReplCommand {
                 }
             };
 
-            let instance = cli_linker
-                .instantiate_async(&mut store, &component)
-                .await
-                .map_err(|e| wasmtime::Error::msg(format!("{e:?}")))?;
-
             let component_id = Uuid::new_v4();
 
             let store = Arc::new(Mutex::new(store));
@@ -107,10 +102,11 @@ impl ReplCommand {
                 engine: engine.clone(),
                 component_id,
             });
-            let invoke = Arc::new(WasmtimeComponentFunctionInvoke {
+            let invoke = Arc::new(WasmtimeWorkerInvoke {
                 component,
-                instance,
+                linker: cli_linker,
                 store,
+                instances: Mutex::new(HashMap::new()),
                 component_id,
             });
 
@@ -143,7 +139,9 @@ struct WasmtimeRibDependencyManager {
 #[async_trait]
 impl RibDependencyManager for WasmtimeRibDependencyManager {
     async fn get_dependencies(&self) -> Result<ReplComponentBundle> {
-        bail!("load a component via `wasmtime repl <component.wasm>` (no multi-project mode yet)")
+bail!(
+            "load a component via `wasmtime repl <component.wasm>` (no multi-project mode yet)"
+        )
     }
 
     async fn add_component(
@@ -155,7 +153,8 @@ impl RibDependencyManager for WasmtimeRibDependencyManager {
             .with_context(|| format!("failed to read {}", source_path.display()))?;
         // Compile a component from wasm/WAT bytes (same as `Component::new` / `wasmtime run`).
         // `Component::deserialize` is only for precompiled artifacts (ELF), not `.wasm` binaries.
-        let comp = Component::new(&self.engine, &bytes).map_err(|e| anyhow!("{e:?}"))?;
+        let comp = Component::new(&self.engine, &bytes)
+            .map_err(|e| anyhow!("{e:?}"))?;
         let exports = component_exports(&self.engine, comp.component_type())?;
         ComponentDependency::from_wit_metadata(
             ComponentDependencyKey {
@@ -171,38 +170,67 @@ impl RibDependencyManager for WasmtimeRibDependencyManager {
     }
 }
 
-struct WasmtimeComponentFunctionInvoke {
+struct WasmtimeWorkerInvoke {
     component: Component,
-    instance: Instance,
+    linker: Linker<Host>,
     store: Arc<Mutex<Store<Host>>>,
+    /// One component [`Instance`] per Rib worker name (`instance()`, `instance("x")`, …).
+    instances: Mutex<HashMap<String, Instance>>,
     component_id: Uuid,
 }
 
+impl WasmtimeWorkerInvoke {
+    async fn instance_for(&self, worker_name: &str) -> Result<Instance> {
+        if let Some(&i) = self.instances.lock().await.get(worker_name) {
+            return Ok(i);
+        }
+
+        let mut store = self.store.lock().await;
+        let new_inst = self
+            .linker
+            .instantiate_async(&mut *store, &self.component)
+            .await
+            .map_err(|e| anyhow!("{e:?}"))?;
+        drop(store);
+
+        let mut instances = self.instances.lock().await;
+        if let Some(&i) = instances.get(worker_name) {
+            return Ok(i);
+        }
+        instances.insert(worker_name.to_string(), new_inst);
+        Ok(new_inst)
+    }
+}
+
 #[async_trait]
-impl ComponentFunctionInvoke for WasmtimeComponentFunctionInvoke {
+impl ComponentFunctionInvoke for WasmtimeWorkerInvoke {
     async fn invoke(
         &self,
         component_id: Uuid,
         _component_name: &str,
-        _worker_name: &str,
+        worker_name: &str,
         function_name: &str,
         args: Vec<ValueAndType>,
         return_type: Option<WitType>,
     ) -> Result<Option<ValueAndType>> {
         if component_id != self.component_id {
-            bail!("unexpected component id (only one component is supported)");
+bail!(
+                "unexpected component id (only one component is supported)"
+            );
         }
 
-        let parsed = ParsedFunctionName::parse(function_name)
-            .map_err(|e| anyhow!("invalid function name `{function_name}`: {e}"))?;
+        let parsed = ParsedFunctionName::parse(function_name).map_err(|e| {
+anyhow!("invalid function name `{function_name}`: {e}")
+        })?;
 
         let path = export_path(&parsed);
         let export = resolve_export(&self.component, &path)
             .with_context(|| format!("resolve export for `{function_name}`"))?;
 
+        let instance = self.instance_for(worker_name).await?;
+
         let mut store = self.store.lock().await;
-        let func = self
-            .instance
+        let func = instance
             .get_func(&mut *store, export)
             .ok_or_else(|| anyhow!("export is not a function"))?;
 
@@ -210,7 +238,11 @@ impl ComponentFunctionInvoke for WasmtimeComponentFunctionInvoke {
         let result_tys: Vec<WType> = func.ty(&*store).results().collect();
 
         if param_tys.len() != args.len() {
-            bail!("expected {} arguments, got {}", param_tys.len(), args.len());
+bail!(
+                "expected {} arguments, got {}",
+                param_tys.len(),
+                args.len()
+            );
         }
 
         let mut params = Vec::with_capacity(args.len());
@@ -225,14 +257,15 @@ impl ComponentFunctionInvoke for WasmtimeComponentFunctionInvoke {
         let out = match results.len() {
             0 => None,
             1 => {
-                let rt = return_type
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("missing return type for non-unit function"))?;
+                let rt = return_type.as_ref().ok_or_else(|| {
+anyhow!("missing return type for non-unit function")
+                })?;
                 Some(val_to_value_and_type(rt, &results[0])?)
             }
             _ => {
-                let tuple_ty = return_type
-                    .ok_or_else(|| anyhow!("missing return type for multi-return function"))?;
+                let tuple_ty = return_type.ok_or_else(|| {
+anyhow!("missing return type for multi-return function")
+                })?;
                 let vals: Result<Vec<ValueAndType>> = results
                     .iter()
                     .enumerate()
@@ -290,16 +323,21 @@ fn export_path(parsed: &ParsedFunctionName) -> Vec<String> {
     segments
 }
 
-fn resolve_export(component: &Component, path: &[String]) -> Result<ComponentExportIndex> {
+fn resolve_export(
+    component: &Component,
+    path: &[String],
+) -> Result<ComponentExportIndex> {
     if path.is_empty() {
-        bail!("empty export path");
+bail!("empty export path");
     }
     let mut instance: Option<ComponentExportIndex> = None;
     for name in &path[..path.len() - 1] {
         instance = Some(
             component
                 .get_export_index(instance.as_ref(), name)
-                .ok_or_else(|| anyhow!("missing instance export `{name}`"))?,
+                .ok_or_else(|| {
+anyhow!("missing instance export `{name}`")
+                })?,
         );
     }
     let last = path.last().unwrap();
@@ -308,7 +346,10 @@ fn resolve_export(component: &Component, path: &[String]) -> Result<ComponentExp
         .ok_or_else(|| anyhow!("missing function export `{last}`"))
 }
 
-fn component_exports(engine: &Engine, component: types::Component) -> Result<Vec<WitExport>> {
+fn component_exports(
+    engine: &Engine,
+    component: types::Component,
+) -> Result<Vec<WitExport>> {
     let funcs = collect_component_funcs(engine, component);
     let mut root_funcs = Vec::new();
     let mut by_instance: BTreeMap<String, Vec<WitFunction>> = BTreeMap::new();
@@ -368,7 +409,10 @@ fn collect_component_funcs(
         .collect()
 }
 
-fn component_func_to_wit(path: &[String], f: &types::ComponentFunc) -> Result<WitFunction> {
+fn component_func_to_wit(
+    path: &[String],
+    f: &types::ComponentFunc,
+) -> Result<WitFunction> {
     let name = path.last().expect("func path").clone();
     let parameters = f
         .params()
@@ -512,15 +556,20 @@ fn wasm_type_to_wit(ty: &WType) -> Result<WitType> {
             mode: AnalysedResourceMode::Borrowed,
         }),
         WType::Map(_) => {
-            bail!("Rib metadata does not support WIT `map` yet")
+bail!("Rib metadata does not support WIT `map` yet")
         }
         WType::Future(_) | WType::Stream(_) | WType::ErrorContext => {
-            bail!("async component types are not supported in Rib metadata yet")
+bail!(
+                "async component types are not supported in Rib metadata yet"
+            )
         }
     })
 }
 
-fn value_and_type_to_val(expected: &WType, v: &ValueAndType) -> Result<Val> {
+fn value_and_type_to_val(
+    expected: &WType,
+    v: &ValueAndType,
+) -> Result<Val> {
     use rib::wit_type::WitType as WT;
     match (expected, &v.value) {
         (WType::Bool, Value::Bool(b)) => Ok(Val::Bool(*b)),
@@ -552,7 +601,7 @@ fn value_and_type_to_val(expected: &WType, v: &ValueAndType) -> Result<Val> {
                     })
                     .collect::<Result<_>>()?
             } else {
-                bail!("list type mismatch");
+bail!("list type mismatch");
             };
             Ok(Val::List(inner))
         }
@@ -561,10 +610,10 @@ fn value_and_type_to_val(expected: &WType, v: &ValueAndType) -> Result<Val> {
                 unreachable!()
             };
             let WT::Record(rec_ty) = &v.typ else {
-                bail!("record type mismatch");
+bail!("record type mismatch");
             };
             if rec_ty.fields.len() != items.len() {
-                bail!("record field count mismatch");
+bail!("record field count mismatch");
             }
             let pairs: Result<Vec<(String, Val)>> = r
                 .fields()
@@ -587,7 +636,7 @@ fn value_and_type_to_val(expected: &WType, v: &ValueAndType) -> Result<Val> {
                 unreachable!()
             };
             let WT::Tuple(tup_ty) = &v.typ else {
-                bail!("tuple type mismatch");
+bail!("tuple type mismatch");
             };
             let inner = t
                 .types()
@@ -617,7 +666,7 @@ fn value_and_type_to_val(expected: &WType, v: &ValueAndType) -> Result<Val> {
                 (None, None) => None,
                 (Some(wt), Some(boxed)) => {
                     let WT::Variant(var_ty) = &v.typ else {
-                        bail!("variant type mismatch");
+bail!("variant type mismatch");
                     };
                     let case_ty = var_ty
                         .cases
@@ -651,7 +700,7 @@ fn value_and_type_to_val(expected: &WType, v: &ValueAndType) -> Result<Val> {
                 unreachable!()
             };
             let WT::Option(opt_ty) = &v.typ else {
-                bail!("option type mismatch");
+bail!("option type mismatch");
             };
             let mapped = match inner {
                 None => None,
@@ -667,17 +716,18 @@ fn value_and_type_to_val(expected: &WType, v: &ValueAndType) -> Result<Val> {
                 unreachable!()
             };
             let WT::Result(res_ty) = &v.typ else {
-                bail!("result type mismatch");
+bail!("result type mismatch");
             };
             let mapped = match inner {
                 Ok(v) => Ok(match v {
                     None => None,
                     Some(b) => {
-                        let wt = r.ok().ok_or_else(|| anyhow!("result ok type missing"))?;
-                        let at = res_ty
-                            .ok
-                            .as_deref()
-                            .ok_or_else(|| anyhow!("result ok type missing"))?;
+                        let wt = r.ok().ok_or_else(|| {
+anyhow!("result ok type missing")
+                        })?;
+                        let at = res_ty.ok.as_deref().ok_or_else(|| {
+anyhow!("result ok type missing")
+                        })?;
                         Some(Box::new(value_and_type_to_val(
                             &wt,
                             &ValueAndType::new((**b).clone(), at.clone()),
@@ -687,11 +737,12 @@ fn value_and_type_to_val(expected: &WType, v: &ValueAndType) -> Result<Val> {
                 Err(v) => Err(match v {
                     None => None,
                     Some(b) => {
-                        let wt = r.err().ok_or_else(|| anyhow!("result err type missing"))?;
-                        let at = res_ty
-                            .err
-                            .as_deref()
-                            .ok_or_else(|| anyhow!("result err type missing"))?;
+                        let wt = r.err().ok_or_else(|| {
+anyhow!("result err type missing")
+                        })?;
+                        let at = res_ty.err.as_deref().ok_or_else(|| {
+anyhow!("result err type missing")
+                        })?;
                         Some(Box::new(value_and_type_to_val(
                             &wt,
                             &ValueAndType::new((**b).clone(), at.clone()),
@@ -750,7 +801,7 @@ fn val_to_value_and_type(ty: &WitType, v: &Val) -> Result<ValueAndType> {
         }
         (WT::Record(rt), Val::Record(pairs)) => {
             if rt.fields.len() != pairs.len() {
-                bail!("record field mismatch");
+bail!("record field mismatch");
             }
             let vals: Result<Vec<Value>> = rt
                 .fields
@@ -758,7 +809,7 @@ fn val_to_value_and_type(ty: &WitType, v: &Val) -> Result<ValueAndType> {
                 .zip(pairs.iter())
                 .map(|(f, (n, val))| {
                     if f.name != *n {
-                        bail!("record field name mismatch");
+bail!("record field name mismatch");
                     }
                     Ok(val_to_value_and_type(&f.typ, val)?.value)
                 })
@@ -767,7 +818,7 @@ fn val_to_value_and_type(ty: &WitType, v: &Val) -> Result<ValueAndType> {
         }
         (WT::Tuple(tt), Val::Tuple(items)) => {
             if tt.items.len() != items.len() {
-                bail!("tuple arity mismatch");
+bail!("tuple arity mismatch");
             }
             let vals: Result<Vec<Value>> = tt
                 .items
@@ -803,7 +854,8 @@ fn val_to_value_and_type(ty: &WitType, v: &Val) -> Result<ValueAndType> {
                 .cases
                 .iter()
                 .position(|c| c == name)
-                .ok_or_else(|| anyhow!("unknown enum case `{name}`"))? as u32;
+                .ok_or_else(|| anyhow!("unknown enum case `{name}`"))?
+                as u32;
             ValueAndType::new(Value::Enum(idx), ty.clone())
         }
         (WT::Option(ot), Val::Option(inner)) => {
@@ -821,7 +873,9 @@ fn val_to_value_and_type(ty: &WitType, v: &Val) -> Result<ValueAndType> {
                     None => None,
                     Some(b) => Some(Box::new(
                         val_to_value_and_type(
-                            rt.ok.as_deref().ok_or_else(|| anyhow!("ok type"))?,
+                            rt.ok
+                                .as_deref()
+                                .ok_or_else(|| anyhow!("ok type"))?,
                             b,
                         )?
                         .value,
@@ -831,7 +885,9 @@ fn val_to_value_and_type(ty: &WitType, v: &Val) -> Result<ValueAndType> {
                     None => None,
                     Some(b) => Some(Box::new(
                         val_to_value_and_type(
-                            rt.err.as_deref().ok_or_else(|| anyhow!("err type"))?,
+                            rt.err
+                                .as_deref()
+                                .ok_or_else(|| anyhow!("err type"))?,
                             b,
                         )?
                         .value,
