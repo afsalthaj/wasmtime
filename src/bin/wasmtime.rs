@@ -95,7 +95,7 @@ enum Subcommand {
 
     /// Interactive Rib REPL for a WebAssembly component
     #[cfg(feature = "rib")]
-    Rib(wasmtime_cli::commands::RibCommand),
+    Repl(wasmtime_cli::commands::ReplCommand),
 }
 
 impl Wasmtime {
@@ -138,7 +138,7 @@ impl Wasmtime {
             Subcommand::Wizer(c) => c.execute(),
 
             #[cfg(feature = "rib")]
-            Subcommand::Rib(c) => c.execute(),
+            Subcommand::Repl(c) => c.execute(),
         }
     }
 }

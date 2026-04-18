@@ -91,7 +91,7 @@ http = { workspace = true, optional = true }
 http-body-util = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 
-# Optional Rib language REPL for components (`wasmtime rib`, feature `rib`).
+# Optional Rib language REPL for components (`wasmtime repl`, feature `rib`).
 rib-repl = { version = "0.0.3", optional = true }
 
 [target.'cfg(unix)'.dependencies]

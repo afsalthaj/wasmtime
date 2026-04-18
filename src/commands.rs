@@ -46,6 +46,6 @@ mod wizer;
 pub use self::wizer::*;
 
 #[cfg(feature = "rib")]
-mod rib;
+mod repl;
 #[cfg(feature = "rib")]
-pub use self::rib::*;
+pub use self::repl::*;
