@@ -304,11 +304,15 @@ impl ComponentFunctionInvoke for WasmtimeWorkerInvoke {
         let mut reg = self.resource_table.lock().await;
         let out = match results.len() {
             0 => None,
-            1 => Some(val_to_rib_val(&results[0], &mut reg)?),
+            1 => Some(val_to_rib_val(
+                &results[0],
+                &mut reg,
+                worker_name,
+            )?),
             _ => {
                 let parts: Result<Vec<RibVal>> = results
                     .iter()
-                    .map(|v| val_to_rib_val(v, &mut reg))
+                    .map(|v| val_to_rib_val(v, &mut reg, worker_name))
                     .collect();
                 Some(RibVal::Tuple(parts?))
             }
@@ -620,6 +624,10 @@ fn wasm_type_to_wit(ty: &WType) -> Result<WitType> {
 }
 
 /// [`RibVal`] ↔ Wasmtime [`Val`] by shape — resource handles use [`ReplResourceTable`].
+///
+/// Rib passes the **component instance** name for resource method calls by taking the last `/`
+/// segment of [`RibVal::Handle::uri`]. Embeddings must therefore encode the Wasmtime worker name
+/// there (see [`val_to_rib_val`] for `wasmtime repl`).
 fn rib_val_to_val(rv: &RibVal, reg: &ReplResourceTable) -> Result<Val> {
     use RibVal as R;
     Ok(match rv {
@@ -688,7 +696,7 @@ fn rib_val_to_val(rv: &RibVal, reg: &ReplResourceTable) -> Result<Val> {
     })
 }
 
-fn val_to_rib_val(v: &Val, reg: &mut ReplResourceTable) -> Result<RibVal> {
+fn val_to_rib_val(v: &Val, reg: &mut ReplResourceTable, worker_name: &str) -> Result<RibVal> {
     use RibVal as R;
     Ok(match v {
         Val::Bool(b) => R::Bool(*b),
@@ -707,48 +715,50 @@ fn val_to_rib_val(v: &Val, reg: &mut ReplResourceTable) -> Result<RibVal> {
         Val::List(items) => R::List(
             items
                 .iter()
-                .map(|v| val_to_rib_val(v, reg))
+                .map(|v| val_to_rib_val(v, reg, worker_name))
                 .collect::<Result<_>>()?,
         ),
         Val::Record(pairs) => R::Record(
             pairs
                 .iter()
-                .map(|(n, v)| Ok((n.clone(), val_to_rib_val(v, reg)?)))
+                .map(|(n, v)| Ok((n.clone(), val_to_rib_val(v, reg, worker_name)?)))
                 .collect::<Result<_>>()?,
         ),
         Val::Tuple(items) => R::Tuple(
             items
                 .iter()
-                .map(|v| val_to_rib_val(v, reg))
+                .map(|v| val_to_rib_val(v, reg, worker_name))
                 .collect::<Result<_>>()?,
         ),
         Val::Variant(name, payload) => R::Variant(
             name.clone(),
             match payload {
                 None => None,
-                Some(b) => Some(Box::new(val_to_rib_val(b, reg)?)),
+                Some(b) => Some(Box::new(val_to_rib_val(b, reg, worker_name)?)),
             },
         ),
         Val::Enum(name) => R::Enum(name.clone()),
         Val::Option(inner) => R::Option(match inner {
             None => None,
-            Some(b) => Some(Box::new(val_to_rib_val(b, reg)?)),
+            Some(b) => Some(Box::new(val_to_rib_val(b, reg, worker_name)?)),
         }),
         Val::Result(inner) => R::Result(match inner {
             Ok(v) => Ok(match v {
                 None => None,
-                Some(b) => Some(Box::new(val_to_rib_val(b, reg)?)),
+                Some(b) => Some(Box::new(val_to_rib_val(b, reg, worker_name)?)),
             }),
             Err(v) => Err(match v {
                 None => None,
-                Some(b) => Some(Box::new(val_to_rib_val(b, reg)?)),
+                Some(b) => Some(Box::new(val_to_rib_val(b, reg, worker_name)?)),
             }),
         }),
         Val::Flags(names) => R::Flags(names.clone()),
         Val::Resource(ra) => {
             let id = reg.register_guest(*ra);
             R::Handle {
-                uri: format!("wasmtime-repl://resource/{id}"),
+                // Rib's interpreter uses the last `/`-separated segment as the worker (instance)
+                // name when invoking resource methods; keep `resource_id` for the Wasmtime table.
+                uri: format!("wasmtime-repl://session/{worker_name}"),
                 resource_id: id,
             }
         }
