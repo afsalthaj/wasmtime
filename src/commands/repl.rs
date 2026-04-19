@@ -21,14 +21,14 @@ use rib_repl::wit_type::{
 use rib_repl::{
     ComponentDependency, ComponentDependencyKey, ComponentFunctionInvoke, ComponentSource,
     ParsedFunctionName, ParsedFunctionSite, ReplComponentBundle, RibDependencyManager, RibRepl,
-    RibReplConfig, RuntimeValue,
+    RibReplConfig, RibVal,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use wasmtime::component::types::{self, ComponentItem as CItem, Type as WType};
-use wasmtime::component::{Component, ComponentExportIndex, Func, Instance, Linker, Val};
+use wasmtime::component::{Component, ComponentExportIndex, Instance, Linker, Val};
 use wasmtime::{Engine, Store};
 
 /// Start an interactive Rib REPL against a WebAssembly component.
@@ -203,9 +203,9 @@ impl ComponentFunctionInvoke for WasmtimeWorkerInvoke {
         _component_name: &str,
         worker_name: &str,
         function_name: &str,
-        args: Vec<RuntimeValue>,
+        args: Vec<RibVal>,
         _return_type: Option<WitType>,
-    ) -> Result<Option<RuntimeValue>> {
+    ) -> Result<Option<RibVal>> {
         if component_id != self.component_id {
             bail!("unexpected component id (only one component is supported)");
         }
@@ -234,22 +234,21 @@ impl ComponentFunctionInvoke for WasmtimeWorkerInvoke {
 
         let mut params = Vec::with_capacity(args.len());
         for arg in &args {
-            params.push(runtime_value_to_val(arg)?);
+            params.push(rib_val_to_val(arg)?);
         }
 
         let mut results: Vec<Val> = (0..n_results).map(|_| Val::Bool(false)).collect();
 
-        func.call_async(&mut store, &params, &mut results)
+        func.call_async(&mut *store, &params, &mut results)
             .await
             .map_err(|e| anyhow!("{e:?}"))?;
 
         let out = match results.len() {
             0 => None,
-            1 => Some(val_to_runtime_value(&results[0])?),
+            1 => Some(val_to_rib_val(&results[0])?),
             _ => {
-                let parts: Result<Vec<RuntimeValue>> =
-                    results.iter().map(val_to_runtime_value).collect();
-                Some(RuntimeValue::Tuple(parts?))
+                let parts: Result<Vec<RibVal>> = results.iter().map(val_to_rib_val).collect();
+                Some(RibVal::Tuple(parts?))
             }
         };
 
@@ -504,9 +503,9 @@ fn wasm_type_to_wit(ty: &WType) -> Result<WitType> {
     })
 }
 
-/// [`RuntimeValue`] ↔ Wasmtime [`Val`] by shape only — no WIT / `expected` type.
-fn runtime_value_to_val(rv: &RuntimeValue) -> Result<Val> {
-    use RuntimeValue as R;
+/// [`RibVal`] ↔ Wasmtime [`Val`] by shape only — no WIT / `expected` type.
+fn rib_val_to_val(rv: &RibVal) -> Result<Val> {
+    use RibVal as R;
     Ok(match rv {
         R::Bool(b) => Val::Bool(*b),
         R::S8(x) => Val::S8(*x),
@@ -521,44 +520,34 @@ fn runtime_value_to_val(rv: &RuntimeValue) -> Result<Val> {
         R::Float64(x) => Val::Float64(*x),
         R::Char(c) => Val::Char(*c),
         R::String(s) => Val::String(s.clone()),
-        R::List(items) => Val::List(
-            items
-                .iter()
-                .map(runtime_value_to_val)
-                .collect::<Result<_>>()?,
-        ),
+        R::List(items) => Val::List(items.iter().map(rib_val_to_val).collect::<Result<_>>()?),
         R::Record(pairs) => Val::Record(
             pairs
                 .iter()
-                .map(|(n, v)| Ok((n.clone(), runtime_value_to_val(v)?)))
+                .map(|(n, v)| Ok((n.clone(), rib_val_to_val(v)?)))
                 .collect::<Result<_>>()?,
         ),
-        R::Tuple(items) => Val::Tuple(
-            items
-                .iter()
-                .map(runtime_value_to_val)
-                .collect::<Result<_>>()?,
-        ),
+        R::Tuple(items) => Val::Tuple(items.iter().map(rib_val_to_val).collect::<Result<_>>()?),
         R::Variant(name, payload) => {
             let p = match payload {
                 None => None,
-                Some(b) => Some(Box::new(runtime_value_to_val(b)?)),
+                Some(b) => Some(Box::new(rib_val_to_val(b)?)),
             };
             Val::Variant(name.clone(), p)
         }
         R::Enum(name) => Val::Enum(name.clone()),
         R::Option(inner) => Val::Option(match inner {
             None => None,
-            Some(b) => Some(Box::new(runtime_value_to_val(b)?)),
+            Some(b) => Some(Box::new(rib_val_to_val(b)?)),
         }),
         R::Result(inner) => Val::Result(match inner {
             Ok(v) => Ok(match v {
                 None => None,
-                Some(b) => Some(Box::new(runtime_value_to_val(b)?)),
+                Some(b) => Some(Box::new(rib_val_to_val(b)?)),
             }),
             Err(v) => Err(match v {
                 None => None,
-                Some(b) => Some(Box::new(runtime_value_to_val(b)?)),
+                Some(b) => Some(Box::new(rib_val_to_val(b)?)),
             }),
         }),
         R::Flags(names) => Val::Flags(names.clone()),
@@ -566,8 +555,8 @@ fn runtime_value_to_val(rv: &RuntimeValue) -> Result<Val> {
     })
 }
 
-fn val_to_runtime_value(v: &Val) -> Result<RuntimeValue> {
-    use RuntimeValue as R;
+fn val_to_rib_val(v: &Val) -> Result<RibVal> {
+    use RibVal as R;
     Ok(match v {
         Val::Bool(b) => R::Bool(*b),
         Val::S8(x) => R::S8(*x),
@@ -582,44 +571,34 @@ fn val_to_runtime_value(v: &Val) -> Result<RuntimeValue> {
         Val::Float64(x) => R::Float64(*x),
         Val::Char(c) => R::Char(*c),
         Val::String(s) => R::String(s.clone()),
-        Val::List(items) => R::List(
-            items
-                .iter()
-                .map(val_to_runtime_value)
-                .collect::<Result<_>>()?,
-        ),
+        Val::List(items) => R::List(items.iter().map(val_to_rib_val).collect::<Result<_>>()?),
         Val::Record(pairs) => R::Record(
             pairs
                 .iter()
-                .map(|(n, v)| Ok((n.clone(), val_to_runtime_value(v)?)))
+                .map(|(n, v)| Ok((n.clone(), val_to_rib_val(v)?)))
                 .collect::<Result<_>>()?,
         ),
-        Val::Tuple(items) => R::Tuple(
-            items
-                .iter()
-                .map(val_to_runtime_value)
-                .collect::<Result<_>>()?,
-        ),
+        Val::Tuple(items) => R::Tuple(items.iter().map(val_to_rib_val).collect::<Result<_>>()?),
         Val::Variant(name, payload) => R::Variant(
             name.clone(),
             match payload {
                 None => None,
-                Some(b) => Some(Box::new(val_to_runtime_value(b)?)),
+                Some(b) => Some(Box::new(val_to_rib_val(b)?)),
             },
         ),
         Val::Enum(name) => R::Enum(name.clone()),
         Val::Option(inner) => R::Option(match inner {
             None => None,
-            Some(b) => Some(Box::new(val_to_runtime_value(b)?)),
+            Some(b) => Some(Box::new(val_to_rib_val(b)?)),
         }),
         Val::Result(inner) => R::Result(match inner {
             Ok(v) => Ok(match v {
                 None => None,
-                Some(b) => Some(Box::new(val_to_runtime_value(b)?)),
+                Some(b) => Some(Box::new(val_to_rib_val(b)?)),
             }),
             Err(v) => Err(match v {
                 None => None,
-                Some(b) => Some(Box::new(val_to_runtime_value(b)?)),
+                Some(b) => Some(Box::new(val_to_rib_val(b)?)),
             }),
         }),
         Val::Flags(names) => R::Flags(names.clone()),
