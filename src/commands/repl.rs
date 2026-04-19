@@ -11,18 +11,8 @@ use clap::Parser;
 use rib_repl::anyhow::Context as _;
 use rib_repl::anyhow::{Result, anyhow, bail};
 use rib_repl::uuid::Uuid;
-use rib_repl::wit_type::{
-    AnalysedResourceId, AnalysedResourceMode, NameOptionTypePair, NameTypePair, TypeBool, TypeChr,
-    TypeEnum, TypeF32, TypeF64, TypeFlags, TypeHandle, TypeList, TypeOption, TypeRecord,
-    TypeResult, TypeS8, TypeS16, TypeS32, TypeS64, TypeStr, TypeTuple, TypeU8, TypeU16, TypeU32,
-    TypeU64, TypeVariant, WitExport, WitFunction, WitFunctionParameter, WitFunctionResult,
-    WitInterface, WitType,
-};
-use rib_repl::{
-    ComponentDependency, ComponentDependencyKey, ComponentFunctionInvoke, ComponentSource,
-    ParsedFunctionName, ParsedFunctionSite, ReplComponentBundle, RibDependencyManager, RibRepl,
-    RibReplConfig, RibVal,
-};
+use rib_repl::wit_type::*;
+use rib_repl::*;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
