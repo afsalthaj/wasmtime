@@ -76,8 +76,11 @@ impl ReplCommand {
             };
 
             let engine = run_cmd.new_engine()?;
+
             let main = run_cmd.run.load_module(&engine, &wasm_path, None)?;
+
             let (store, linker) = run_cmd.new_store_and_linker(&engine, &main)?;
+
             let RunTarget::Component(component) = main else {
                 return Err(wasmtime::Error::msg(
                     "`wasmtime repl` expects a WebAssembly component, not a core module",
@@ -94,10 +97,12 @@ impl ReplCommand {
             let component_id = Uuid::new_v4();
 
             let store = Arc::new(Mutex::new(store));
+
             let dep_manager = Arc::new(WasmtimeRibDependencyManager {
                 engine: engine.clone(),
                 component_id,
             });
+
             let invoke = Arc::new(WasmtimeWorkerInvoke {
                 component,
                 linker: cli_linker,
@@ -182,18 +187,23 @@ impl WasmtimeWorkerInvoke {
         }
 
         let mut store = self.store.lock().await;
+
         let new_inst = self
             .linker
             .instantiate_async(&mut *store, &self.component)
             .await
             .map_err(|e| anyhow!("{e:?}"))?;
+
         drop(store);
 
         let mut instances = self.instances.lock().await;
+
         if let Some(&i) = instances.get(worker_name) {
             return Ok(i);
         }
+
         instances.insert(worker_name.to_string(), new_inst);
+
         Ok(new_inst)
     }
 }
@@ -217,18 +227,22 @@ impl ComponentFunctionInvoke for WasmtimeWorkerInvoke {
             .map_err(|e| anyhow!("invalid function name `{function_name}`: {e}"))?;
 
         let path = export_path(&parsed);
+
         let export = resolve_export(&self.component, &path)
             .with_context(|| format!("resolve export for `{function_name}`"))?;
 
         let instance = self.instance_for(worker_name).await?;
 
         let mut store = self.store.lock().await;
+
         let func = instance
             .get_func(&mut *store, export)
             .ok_or_else(|| anyhow!("export is not a function"))?;
 
         let fty = func.ty(&*store);
+
         let n_params = fty.params().count();
+
         let n_results = fty.results().count();
 
         if n_params != args.len() {
@@ -240,6 +254,7 @@ impl ComponentFunctionInvoke for WasmtimeWorkerInvoke {
         }
 
         let mut params = Vec::with_capacity(args.len());
+
         for arg in &args {
             params.push(runtime_value_to_val(arg)?);
         }
