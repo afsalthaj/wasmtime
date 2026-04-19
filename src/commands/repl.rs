@@ -625,9 +625,7 @@ fn wasm_type_to_wit(ty: &WType) -> Result<WitType> {
 
 /// [`RibVal`] ↔ Wasmtime [`Val`] by shape — resource handles use [`ReplResourceTable`].
 ///
-/// Rib passes the **component instance** name for resource method calls by taking the last `/`
-/// segment of [`RibVal::Handle::uri`]. Embeddings must therefore encode the Wasmtime worker name
-/// there (see [`val_to_rib_val`] for `wasmtime repl`).
+/// Resource routing uses `RibVal::Handle::worker_name`; `uri` is informational for display.
 fn rib_val_to_val(rv: &RibVal, reg: &ReplResourceTable) -> Result<Val> {
     use RibVal as R;
     Ok(match rv {
@@ -685,7 +683,11 @@ fn rib_val_to_val(rv: &RibVal, reg: &ReplResourceTable) -> Result<Val> {
             }),
         }),
         R::Flags(names) => Val::Flags(names.clone()),
-        R::Handle { uri, resource_id } => {
+        R::Handle {
+            uri,
+            resource_id,
+            worker_name: _,
+        } => {
             let ra = reg.get(*resource_id).ok_or_else(|| {
                 anyhow!(
                     "unknown resource handle id {resource_id} (uri={uri}); was it created in this REPL session?"
@@ -756,10 +758,9 @@ fn val_to_rib_val(v: &Val, reg: &mut ReplResourceTable, worker_name: &str) -> Re
         Val::Resource(ra) => {
             let id = reg.register_guest(*ra);
             R::Handle {
-                // Rib's interpreter uses the last `/`-separated segment as the worker (instance)
-                // name when invoking resource methods; keep `resource_id` for the Wasmtime table.
-                uri: format!("wasmtime-repl://session/{worker_name}"),
+                uri: format!("wasmtime-repl://resource/{id}"),
                 resource_id: id,
+                worker_name: worker_name.to_string(),
             }
         }
         Val::Map(_) => bail!("WIT maps are not supported in `wasmtime repl` yet"),
