@@ -8,8 +8,8 @@ use super::run::{CliLinker, Host, Preloads, RunCommand};
 use crate::common::{RunCommon, RunTarget};
 use async_trait::async_trait;
 use clap::Parser;
-use rib_repl::anyhow::{anyhow, bail, Result};
 use rib_repl::anyhow::Context as _;
+use rib_repl::anyhow::{Result, anyhow, bail};
 use rib_repl::uuid::Uuid;
 use rib_repl::wit_type::{
     AnalysedResourceId, AnalysedResourceMode, NameOptionTypePair, NameTypePair, TypeBool, TypeChr,
@@ -140,9 +140,7 @@ struct WasmtimeRibDependencyManager {
 #[async_trait]
 impl RibDependencyManager for WasmtimeRibDependencyManager {
     async fn get_dependencies(&self) -> Result<ReplComponentBundle> {
-        bail!(
-            "load a component via `wasmtime repl <component.wasm>` (no multi-project mode yet)"
-        )
+        bail!("load a component via `wasmtime repl <component.wasm>` (no multi-project mode yet)")
     }
 
     async fn add_component(
@@ -154,8 +152,7 @@ impl RibDependencyManager for WasmtimeRibDependencyManager {
             .with_context(|| format!("failed to read {}", source_path.display()))?;
         // Compile a component from wasm/WAT bytes (same as `Component::new` / `wasmtime run`).
         // `Component::deserialize` is only for precompiled artifacts (ELF), not `.wasm` binaries.
-        let comp = Component::new(&self.engine, &bytes)
-            .map_err(|e| anyhow!("{e:?}"))?;
+        let comp = Component::new(&self.engine, &bytes).map_err(|e| anyhow!("{e:?}"))?;
         let exports = component_exports(&self.engine, comp.component_type())?;
         ComponentDependency::from_wit_metadata(
             ComponentDependencyKey {
@@ -245,11 +242,7 @@ impl ComponentFunctionInvoke for WasmtimeWorkerInvoke {
         let n_results = fty.results().count();
 
         if n_params != args.len() {
-            bail!(
-                "expected {} arguments, got {}",
-                n_params,
-                args.len()
-            );
+            bail!("expected {} arguments, got {}", n_params, args.len());
         }
 
         let mut params = Vec::with_capacity(args.len());
@@ -322,10 +315,7 @@ fn resolve_export(component: &Component, path: &[String]) -> Result<ComponentExp
         .ok_or_else(|| anyhow!("missing function export `{last}`"))
 }
 
-fn component_exports(
-    engine: &Engine,
-    component: types::Component,
-) -> Result<Vec<WitExport>> {
+fn component_exports(engine: &Engine, component: types::Component) -> Result<Vec<WitExport>> {
     let funcs = collect_component_funcs(engine, component);
     let mut root_funcs = Vec::new();
     let mut by_instance: BTreeMap<String, Vec<WitFunction>> = BTreeMap::new();
@@ -385,10 +375,7 @@ fn collect_component_funcs(
         .collect()
 }
 
-fn component_func_to_wit(
-    path: &[String],
-    f: &types::ComponentFunc,
-) -> Result<WitFunction> {
+fn component_func_to_wit(path: &[String], f: &types::ComponentFunc) -> Result<WitFunction> {
     let name = path.last().expect("func path").clone();
     let parameters = f
         .params()
