@@ -219,8 +219,8 @@ struct WasmtimeWorkerInvoke {
 }
 
 impl WasmtimeWorkerInvoke {
-    async fn instance_for(&self, worker_name: &str) -> Result<Instance> {
-        if let Some(&i) = self.instances.lock().await.get(worker_name) {
+    async fn instance_for(&self, instance_name: &str) -> Result<Instance> {
+        if let Some(&i) = self.instances.lock().await.get(instance_name) {
             return Ok(i);
         }
 
@@ -233,10 +233,10 @@ impl WasmtimeWorkerInvoke {
         drop(store);
 
         let mut instances = self.instances.lock().await;
-        if let Some(&i) = instances.get(worker_name) {
+        if let Some(&i) = instances.get(instance_name) {
             return Ok(i);
         }
-        instances.insert(worker_name.to_string(), new_inst);
+        instances.insert(instance_name.to_string(), new_inst);
         Ok(new_inst)
     }
 }
@@ -247,7 +247,7 @@ impl ComponentFunctionInvoke for WasmtimeWorkerInvoke {
         &self,
         component_id: Uuid,
         _component_name: &str,
-        worker_name: &str,
+        instance_name: &str,
         function_name: &str,
         args: Vec<RibVal>,
         _return_type: Option<WitType>,
@@ -269,7 +269,7 @@ impl ComponentFunctionInvoke for WasmtimeWorkerInvoke {
             },
         )?;
 
-        let instance = self.instance_for(worker_name).await?;
+        let instance = self.instance_for(instance_name).await?;
 
         let mut store = self.store.lock().await;
         let func = instance
@@ -307,12 +307,12 @@ impl ComponentFunctionInvoke for WasmtimeWorkerInvoke {
             1 => Some(val_to_rib_val(
                 &results[0],
                 &mut reg,
-                worker_name,
+                instance_name,
             )?),
             _ => {
                 let parts: Result<Vec<RibVal>> = results
                     .iter()
-                    .map(|v| val_to_rib_val(v, &mut reg, worker_name))
+                    .map(|v| val_to_rib_val(v, &mut reg, instance_name))
                     .collect();
                 Some(RibVal::Tuple(parts?))
             }
@@ -625,7 +625,7 @@ fn wasm_type_to_wit(ty: &WType) -> Result<WitType> {
 
 /// [`RibVal`] ↔ Wasmtime [`Val`] by shape — resource handles use [`ReplResourceTable`].
 ///
-/// Resource routing uses `RibVal::Handle::worker_name`; `uri` is informational for display.
+/// Resource routing uses `RibVal::Handle::instance_name`; `uri` is informational for display.
 fn rib_val_to_val(rv: &RibVal, reg: &ReplResourceTable) -> Result<Val> {
     use RibVal as R;
     Ok(match rv {
@@ -686,7 +686,7 @@ fn rib_val_to_val(rv: &RibVal, reg: &ReplResourceTable) -> Result<Val> {
         R::Handle {
             uri,
             resource_id,
-            worker_name: _,
+            instance_name: _,
         } => {
             let ra = reg.get(*resource_id).ok_or_else(|| {
                 anyhow!(
@@ -698,7 +698,7 @@ fn rib_val_to_val(rv: &RibVal, reg: &ReplResourceTable) -> Result<Val> {
     })
 }
 
-fn val_to_rib_val(v: &Val, reg: &mut ReplResourceTable, worker_name: &str) -> Result<RibVal> {
+fn val_to_rib_val(v: &Val, reg: &mut ReplResourceTable, instance_name: &str) -> Result<RibVal> {
     use RibVal as R;
     Ok(match v {
         Val::Bool(b) => R::Bool(*b),
@@ -717,41 +717,41 @@ fn val_to_rib_val(v: &Val, reg: &mut ReplResourceTable, worker_name: &str) -> Re
         Val::List(items) => R::List(
             items
                 .iter()
-                .map(|v| val_to_rib_val(v, reg, worker_name))
+                .map(|v| val_to_rib_val(v, reg, instance_name))
                 .collect::<Result<_>>()?,
         ),
         Val::Record(pairs) => R::Record(
             pairs
                 .iter()
-                .map(|(n, v)| Ok((n.clone(), val_to_rib_val(v, reg, worker_name)?)))
+                .map(|(n, v)| Ok((n.clone(), val_to_rib_val(v, reg, instance_name)?)))
                 .collect::<Result<_>>()?,
         ),
         Val::Tuple(items) => R::Tuple(
             items
                 .iter()
-                .map(|v| val_to_rib_val(v, reg, worker_name))
+                .map(|v| val_to_rib_val(v, reg, instance_name))
                 .collect::<Result<_>>()?,
         ),
         Val::Variant(name, payload) => R::Variant(
             name.clone(),
             match payload {
                 None => None,
-                Some(b) => Some(Box::new(val_to_rib_val(b, reg, worker_name)?)),
+                Some(b) => Some(Box::new(val_to_rib_val(b, reg, instance_name)?)),
             },
         ),
         Val::Enum(name) => R::Enum(name.clone()),
         Val::Option(inner) => R::Option(match inner {
             None => None,
-            Some(b) => Some(Box::new(val_to_rib_val(b, reg, worker_name)?)),
+            Some(b) => Some(Box::new(val_to_rib_val(b, reg, instance_name)?)),
         }),
         Val::Result(inner) => R::Result(match inner {
             Ok(v) => Ok(match v {
                 None => None,
-                Some(b) => Some(Box::new(val_to_rib_val(b, reg, worker_name)?)),
+                Some(b) => Some(Box::new(val_to_rib_val(b, reg, instance_name)?)),
             }),
             Err(v) => Err(match v {
                 None => None,
-                Some(b) => Some(Box::new(val_to_rib_val(b, reg, worker_name)?)),
+                Some(b) => Some(Box::new(val_to_rib_val(b, reg, instance_name)?)),
             }),
         }),
         Val::Flags(names) => R::Flags(names.clone()),
@@ -760,7 +760,7 @@ fn val_to_rib_val(v: &Val, reg: &mut ReplResourceTable, worker_name: &str) -> Re
             R::Handle {
                 uri: format!("wasmtime-repl://resource/{id}"),
                 resource_id: id,
-                worker_name: worker_name.to_string(),
+                instance_name: instance_name.to_string(),
             }
         }
         Val::Map(_) => bail!("WIT maps are not supported in `wasmtime repl` yet"),
