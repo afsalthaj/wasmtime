@@ -175,7 +175,6 @@ struct WasmtimeWorkerInvoke {
     component: Component,
     linker: Linker<Host>,
     store: Arc<Mutex<Store<Host>>>,
-    /// One component [`Instance`] per Rib worker name (`instance()`, `instance("x")`, …).
     instances: Mutex<HashMap<String, Instance>>,
     component_id: Uuid,
 }
