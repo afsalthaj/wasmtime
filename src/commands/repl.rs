@@ -8,8 +8,8 @@ use super::run::{CliLinker, Host, Preloads, RunCommand};
 use crate::common::{RunCommon, RunTarget};
 use async_trait::async_trait;
 use clap::Parser;
-use rib_repl::anyhow::{anyhow, bail, Result};
 use rib_repl::anyhow::Context as _;
+use rib_repl::anyhow::{Result, anyhow, bail};
 use rib_repl::uuid::Uuid;
 use rib_repl::wit_type::{
     AnalysedResourceId, AnalysedResourceMode, NameOptionTypePair, NameTypePair, TypeBool, TypeChr,
@@ -19,8 +19,9 @@ use rib_repl::wit_type::{
     WitInterface, WitType,
 };
 use rib_repl::{
-    resolve_wasm_export_path, ComponentDependency, ComponentDependencyKey, ComponentFunctionInvoke,
-    ComponentSource, ReplComponentBundle, RibDependencyManager, RibRepl, RibReplConfig, RibVal,
+    ComponentDependency, ComponentDependencyKey, ComponentFunctionInvoke, ComponentSource,
+    ReplComponentBundle, RibDependencyManager, RibRepl, RibReplConfig, RibVal,
+    resolve_wasm_export_path,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -30,9 +31,6 @@ use wasmtime::component::types::{self, ComponentItem as CItem, Type as WType};
 use wasmtime::component::{Component, ComponentExportIndex, Instance, Linker, ResourceAny, Val};
 use wasmtime::{Engine, Store};
 
-/// Maps Rib [`RibVal::Handle`] ids to Wasmtime [`ResourceAny`] handles returned from / passed to the
-/// guest. Guest-defined resources are only representable as [`ResourceAny`] inside the store; Rib
-/// carries stable numeric ids at the interpreter boundary.
 struct ReplResourceTable {
     next_id: u64,
     guest: HashMap<u64, ResourceAny>,
@@ -114,9 +112,10 @@ impl ReplCommand {
                 ));
             };
 
-            let wit_exports = component_exports(&engine, component.component_type()).map_err(|e| {
-                wasmtime::Error::msg(format!("failed to read component export metadata: {e:?}"))
-            })?;
+            let wit_exports =
+                component_exports(&engine, component.component_type()).map_err(|e| {
+                    wasmtime::Error::msg(format!("failed to read component export metadata: {e:?}"))
+                })?;
 
             let cli_linker = match linker {
                 CliLinker::Component(l) => l,
@@ -172,9 +171,7 @@ struct WasmtimeRibDependencyManager {
 #[async_trait]
 impl RibDependencyManager for WasmtimeRibDependencyManager {
     async fn get_dependencies(&self) -> Result<ReplComponentBundle> {
-        bail!(
-            "load a component via `wasmtime repl <component.wasm>` (no multi-project mode yet)"
-        )
+        bail!("load a component via `wasmtime repl <component.wasm>` (no multi-project mode yet)")
     }
 
     async fn add_component(
@@ -184,10 +181,7 @@ impl RibDependencyManager for WasmtimeRibDependencyManager {
     ) -> Result<ComponentDependency> {
         let bytes = std::fs::read(source_path)
             .with_context(|| format!("failed to read {}", source_path.display()))?;
-        // Compile a component from wasm/WAT bytes (same as `Component::new` / `wasmtime run`).
-        // `Component::deserialize` is only for precompiled artifacts (ELF), not `.wasm` binaries.
-        let comp = Component::new(&self.engine, &bytes)
-            .map_err(|e| anyhow!("{e:?}"))?;
+        let comp = Component::new(&self.engine, &bytes).map_err(|e| anyhow!("{e:?}"))?;
         let exports = component_exports(&self.engine, comp.component_type())?;
         ComponentDependency::from_wit_metadata(
             ComponentDependencyKey {
@@ -206,15 +200,12 @@ impl RibDependencyManager for WasmtimeRibDependencyManager {
 struct WasmtimeWorkerInvoke {
     engine: Engine,
     component: Component,
-    /// WIT-style export surface (same construction as [`component_exports`]); used to map Rib call
-    /// labels to Wasm export paths.
     wit_exports: Vec<WitExport>,
     linker: Linker<Host>,
     store: Arc<Mutex<Store<Host>>>,
     /// One component [`Instance`] per Rib worker name (`instance()`, `instance("x")`, …).
     instances: Mutex<HashMap<String, Instance>>,
     component_id: Uuid,
-    /// Guest resource handles keyed by [`RibVal::Handle::resource_id`].
     resource_table: Mutex<ReplResourceTable>,
 }
 
@@ -260,14 +251,13 @@ impl ComponentFunctionInvoke for WasmtimeWorkerInvoke {
             .map_err(|e| anyhow!("{e}"))
             .with_context(|| format!("resolve export for `{function_name}`"))?;
 
-        let export = fold_export_path_using_binary(&self.engine, &self.component, &path).ok_or_else(
-            || {
+        let export = fold_export_path_using_binary(&self.engine, &self.component, &path)
+            .ok_or_else(|| {
                 anyhow!(
                     "export path [{}] from metadata is not present in this component binary",
                     path.join("/")
                 )
-            },
-        )?;
+            })?;
 
         let instance = self.instance_for(instance_name).await?;
 
@@ -281,14 +271,10 @@ impl ComponentFunctionInvoke for WasmtimeWorkerInvoke {
         let n_results = fty.results().count();
 
         if n_params != args.len() {
-            bail!(
-                "expected {} arguments, got {}",
-                n_params,
-                args.len()
-            );
+            bail!("expected {} arguments, got {}", n_params, args.len());
         }
 
-        let mut reg = self.resource_table.lock().await;
+        let reg = self.resource_table.lock().await;
         let mut params = Vec::with_capacity(args.len());
         for arg in &args {
             params.push(rib_val_to_val(arg, &*reg)?);
@@ -304,11 +290,7 @@ impl ComponentFunctionInvoke for WasmtimeWorkerInvoke {
         let mut reg = self.resource_table.lock().await;
         let out = match results.len() {
             0 => None,
-            1 => Some(val_to_rib_val(
-                &results[0],
-                &mut reg,
-                instance_name,
-            )?),
+            1 => Some(val_to_rib_val(&results[0], &mut reg, instance_name)?),
             _ => {
                 let parts: Result<Vec<RibVal>> = results
                     .iter()
@@ -338,22 +320,17 @@ fn export_names_equivalent(a: &str, b: &str) -> bool {
     a == b || a.replace('-', "_") == b.replace('-', "_")
 }
 
-/// Metadata may use a short interface label (`inventory`) while the component type uses one export
-/// name string that embeds package + interface (`component:rib-smoke/inventory`). Match those by
-/// comparing the metadata segment to the last `/`-separated piece of the binary segment when needed.
 fn wit_export_segment_matches(metadata_seg: &str, binary_seg: &str) -> bool {
     if export_names_equivalent(metadata_seg, binary_seg) {
         return true;
     }
+
     binary_seg
         .rsplit_once('/')
         .map(|(_, last)| export_names_equivalent(metadata_seg, last))
         .unwrap_or(false)
 }
 
-/// [`resolve_wasm_export_path`] returns paths shaped for WIT metadata; [`collect_component_funcs`]
-/// returns the exact segment strings for [`Component::get_export_index`]. Align the two, then fold
-/// using a **binary** path (never a shortened metadata-only path).
 fn fold_export_path_using_binary(
     engine: &Engine,
     component: &Component,
@@ -405,10 +382,7 @@ fn fold_export_path_using_binary(
     None
 }
 
-fn component_exports(
-    engine: &Engine,
-    component: types::Component,
-) -> Result<Vec<WitExport>> {
+fn component_exports(engine: &Engine, component: types::Component) -> Result<Vec<WitExport>> {
     let funcs = collect_component_funcs(engine, component);
     let mut root_funcs = Vec::new();
     let mut by_instance: BTreeMap<String, Vec<WitFunction>> = BTreeMap::new();
@@ -468,10 +442,7 @@ fn collect_component_funcs(
         .collect()
 }
 
-fn component_func_to_wit(
-    path: &[String],
-    f: &types::ComponentFunc,
-) -> Result<WitFunction> {
+fn component_func_to_wit(path: &[String], f: &types::ComponentFunc) -> Result<WitFunction> {
     let name = path.last().expect("func path").clone();
     let parameters = f
         .params()
@@ -623,9 +594,6 @@ fn wasm_type_to_wit(ty: &WType) -> Result<WitType> {
     })
 }
 
-/// [`RibVal`] ↔ Wasmtime [`Val`] by shape — resource handles use [`ReplResourceTable`].
-///
-/// Resource routing uses `RibVal::Handle::instance_name`; `uri` is informational for display.
 fn rib_val_to_val(rv: &RibVal, reg: &ReplResourceTable) -> Result<Val> {
     use RibVal as R;
     Ok(match rv {
