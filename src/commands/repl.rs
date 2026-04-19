@@ -8,11 +8,20 @@ use super::run::{CliLinker, Host, Preloads, RunCommand};
 use crate::common::{RunCommon, RunTarget};
 use async_trait::async_trait;
 use clap::Parser;
+use rib_repl::anyhow::{anyhow, bail, Result};
 use rib_repl::anyhow::Context as _;
-use rib_repl::anyhow::{Result, anyhow, bail};
 use rib_repl::uuid::Uuid;
-use rib_repl::wit_type::*;
-use rib_repl::*;
+use rib_repl::wit_type::{
+    AnalysedResourceId, AnalysedResourceMode, NameOptionTypePair, NameTypePair, TypeBool, TypeChr,
+    TypeEnum, TypeF32, TypeF64, TypeFlags, TypeHandle, TypeList, TypeOption, TypeRecord,
+    TypeResult, TypeS8, TypeS16, TypeS32, TypeS64, TypeStr, TypeTuple, TypeU8, TypeU16, TypeU32,
+    TypeU64, TypeVariant, WitExport, WitFunction, WitFunctionParameter, WitFunctionResult,
+    WitInterface, WitType,
+};
+use rib_repl::{
+    resolve_wasm_export_path, ComponentDependency, ComponentDependencyKey, ComponentFunctionInvoke,
+    ComponentSource, ReplComponentBundle, RibDependencyManager, RibRepl, RibReplConfig, RibVal,
+};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -74,6 +83,10 @@ impl ReplCommand {
                 ));
             };
 
+            let wit_exports = component_exports(&engine, component.component_type()).map_err(|e| {
+                wasmtime::Error::msg(format!("failed to read component export metadata: {e:?}"))
+            })?;
+
             let cli_linker = match linker {
                 CliLinker::Component(l) => l,
                 CliLinker::Core(_) => {
@@ -89,7 +102,9 @@ impl ReplCommand {
                 component_id,
             });
             let invoke = Arc::new(WasmtimeWorkerInvoke {
+                engine: engine.clone(),
                 component,
+                wit_exports,
                 linker: cli_linker,
                 store,
                 instances: Mutex::new(HashMap::new()),
@@ -125,7 +140,9 @@ struct WasmtimeRibDependencyManager {
 #[async_trait]
 impl RibDependencyManager for WasmtimeRibDependencyManager {
     async fn get_dependencies(&self) -> Result<ReplComponentBundle> {
-        bail!("load a component via `wasmtime repl <component.wasm>` (no multi-project mode yet)")
+        bail!(
+            "load a component via `wasmtime repl <component.wasm>` (no multi-project mode yet)"
+        )
     }
 
     async fn add_component(
@@ -137,7 +154,8 @@ impl RibDependencyManager for WasmtimeRibDependencyManager {
             .with_context(|| format!("failed to read {}", source_path.display()))?;
         // Compile a component from wasm/WAT bytes (same as `Component::new` / `wasmtime run`).
         // `Component::deserialize` is only for precompiled artifacts (ELF), not `.wasm` binaries.
-        let comp = Component::new(&self.engine, &bytes).map_err(|e| anyhow!("{e:?}"))?;
+        let comp = Component::new(&self.engine, &bytes)
+            .map_err(|e| anyhow!("{e:?}"))?;
         let exports = component_exports(&self.engine, comp.component_type())?;
         ComponentDependency::from_wit_metadata(
             ComponentDependencyKey {
@@ -154,7 +172,11 @@ impl RibDependencyManager for WasmtimeRibDependencyManager {
 }
 
 struct WasmtimeWorkerInvoke {
+    engine: Engine,
     component: Component,
+    /// WIT-style export surface (same construction as [`component_exports`]); used to map Rib call
+    /// labels to Wasm export paths.
+    wit_exports: Vec<WitExport>,
     linker: Linker<Host>,
     store: Arc<Mutex<Store<Host>>>,
     /// One component [`Instance`] per Rib worker name (`instance()`, `instance("x")`, …).
@@ -200,12 +222,18 @@ impl ComponentFunctionInvoke for WasmtimeWorkerInvoke {
             bail!("unexpected component id (only one component is supported)");
         }
 
-        let parsed = ParsedFunctionName::parse(function_name)
-            .map_err(|e| anyhow!("invalid function name `{function_name}`: {e}"))?;
-
-        let path = export_path(&parsed);
-        let export = resolve_export(&self.component, &path)
+        let path = resolve_wasm_export_path(&self.wit_exports, function_name)
+            .map_err(|e| anyhow!("{e}"))
             .with_context(|| format!("resolve export for `{function_name}`"))?;
+
+        let export = fold_export_path_using_binary(&self.engine, &self.component, &path).ok_or_else(
+            || {
+                anyhow!(
+                    "export path [{}] from metadata is not present in this component binary",
+                    path.join("/")
+                )
+            },
+        )?;
 
         let instance = self.instance_for(worker_name).await?;
 
@@ -219,7 +247,11 @@ impl ComponentFunctionInvoke for WasmtimeWorkerInvoke {
         let n_results = fty.results().count();
 
         if n_params != args.len() {
-            bail!("expected {} arguments, got {}", n_params, args.len());
+            bail!(
+                "expected {} arguments, got {}",
+                n_params,
+                args.len()
+            );
         }
 
         let mut params = Vec::with_capacity(args.len());
@@ -246,42 +278,93 @@ impl ComponentFunctionInvoke for WasmtimeWorkerInvoke {
     }
 }
 
-fn export_path(parsed: &ParsedFunctionName) -> Vec<String> {
-    let mut segments: Vec<String> = match &parsed.site {
-        ParsedFunctionSite::Global => Vec::new(),
-        ParsedFunctionSite::Interface { name } => name.split('/').map(str::to_string).collect(),
-        ParsedFunctionSite::PackagedInterface { .. } => parsed
-            .site
-            .interface_name()
-            .expect("packaged interface has name")
-            .split('/')
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .collect(),
-    };
-    segments.push(parsed.function.function_name());
-    segments
-}
-
-fn resolve_export(component: &Component, path: &[String]) -> Result<ComponentExportIndex> {
+fn fold_export_path(component: &Component, path: &[String]) -> Option<ComponentExportIndex> {
     if path.is_empty() {
-        bail!("empty export path");
+        return None;
     }
     let mut instance: Option<ComponentExportIndex> = None;
     for name in &path[..path.len() - 1] {
-        instance = Some(
-            component
-                .get_export_index(instance.as_ref(), name)
-                .ok_or_else(|| anyhow!("missing instance export `{name}`"))?,
-        );
+        instance = Some(component.get_export_index(instance.as_ref(), name)?);
     }
-    let last = path.last().unwrap();
-    component
-        .get_export_index(instance.as_ref(), last)
-        .ok_or_else(|| anyhow!("missing function export `{last}`"))
+    let last = path.last()?;
+    component.get_export_index(instance.as_ref(), last)
 }
 
-fn component_exports(engine: &Engine, component: types::Component) -> Result<Vec<WitExport>> {
+fn export_names_equivalent(a: &str, b: &str) -> bool {
+    a == b || a.replace('-', "_") == b.replace('-', "_")
+}
+
+/// Metadata may use a short interface label (`inventory`) while the component type uses one export
+/// name string that embeds package + interface (`component:rib-smoke/inventory`). Match those by
+/// comparing the metadata segment to the last `/`-separated piece of the binary segment when needed.
+fn wit_export_segment_matches(metadata_seg: &str, binary_seg: &str) -> bool {
+    if export_names_equivalent(metadata_seg, binary_seg) {
+        return true;
+    }
+    binary_seg
+        .rsplit_once('/')
+        .map(|(_, last)| export_names_equivalent(metadata_seg, last))
+        .unwrap_or(false)
+}
+
+/// [`resolve_wasm_export_path`] returns paths shaped for WIT metadata; [`collect_component_funcs`]
+/// returns the exact segment strings for [`Component::get_export_index`]. Align the two, then fold
+/// using a **binary** path (never a shortened metadata-only path).
+fn fold_export_path_using_binary(
+    engine: &Engine,
+    component: &Component,
+    metadata_path: &[String],
+) -> Option<ComponentExportIndex> {
+    if let Some(idx) = fold_export_path(component, metadata_path) {
+        return Some(idx);
+    }
+
+    let ty = component.component_type();
+    let binary_paths: Vec<Vec<String>> = collect_component_funcs(engine, ty)
+        .into_iter()
+        .map(|(p, _)| p)
+        .collect();
+
+    fn suffix_matches_metadata_flexible(want: &[String], got: &[String]) -> bool {
+        if want.is_empty() || want.len() > got.len() {
+            return false;
+        }
+        let suf = &got[got.len() - want.len()..];
+        want.iter()
+            .zip(suf.iter())
+            .all(|(w, g)| wit_export_segment_matches(w, g))
+    }
+
+    for p in &binary_paths {
+        if suffix_matches_metadata_flexible(metadata_path, p) {
+            if let Some(idx) = fold_export_path(component, p) {
+                return Some(idx);
+            }
+        }
+    }
+
+    if metadata_path.is_empty() {
+        return None;
+    }
+    let mut alt = metadata_path.to_vec();
+    let last = alt.pop()?;
+    for last_try in [last.replace('-', "_"), last.replace('_', "-")] {
+        if last_try == last {
+            continue;
+        }
+        let mut try_path = alt.clone();
+        try_path.push(last_try);
+        if let Some(idx) = fold_export_path(component, &try_path) {
+            return Some(idx);
+        }
+    }
+    None
+}
+
+fn component_exports(
+    engine: &Engine,
+    component: types::Component,
+) -> Result<Vec<WitExport>> {
     let funcs = collect_component_funcs(engine, component);
     let mut root_funcs = Vec::new();
     let mut by_instance: BTreeMap<String, Vec<WitFunction>> = BTreeMap::new();
@@ -341,7 +424,10 @@ fn collect_component_funcs(
         .collect()
 }
 
-fn component_func_to_wit(path: &[String], f: &types::ComponentFunc) -> Result<WitFunction> {
+fn component_func_to_wit(
+    path: &[String],
+    f: &types::ComponentFunc,
+) -> Result<WitFunction> {
     let name = path.last().expect("func path").clone();
     let parameters = f
         .params()
@@ -510,14 +596,24 @@ fn rib_val_to_val(rv: &RibVal) -> Result<Val> {
         R::Float64(x) => Val::Float64(*x),
         R::Char(c) => Val::Char(*c),
         R::String(s) => Val::String(s.clone()),
-        R::List(items) => Val::List(items.iter().map(rib_val_to_val).collect::<Result<_>>()?),
+        R::List(items) => Val::List(
+            items
+                .iter()
+                .map(rib_val_to_val)
+                .collect::<Result<_>>()?,
+        ),
         R::Record(pairs) => Val::Record(
             pairs
                 .iter()
                 .map(|(n, v)| Ok((n.clone(), rib_val_to_val(v)?)))
                 .collect::<Result<_>>()?,
         ),
-        R::Tuple(items) => Val::Tuple(items.iter().map(rib_val_to_val).collect::<Result<_>>()?),
+        R::Tuple(items) => Val::Tuple(
+            items
+                .iter()
+                .map(rib_val_to_val)
+                .collect::<Result<_>>()?,
+        ),
         R::Variant(name, payload) => {
             let p = match payload {
                 None => None,
@@ -561,14 +657,24 @@ fn val_to_rib_val(v: &Val) -> Result<RibVal> {
         Val::Float64(x) => R::Float64(*x),
         Val::Char(c) => R::Char(*c),
         Val::String(s) => R::String(s.clone()),
-        Val::List(items) => R::List(items.iter().map(val_to_rib_val).collect::<Result<_>>()?),
+        Val::List(items) => R::List(
+            items
+                .iter()
+                .map(val_to_rib_val)
+                .collect::<Result<_>>()?,
+        ),
         Val::Record(pairs) => R::Record(
             pairs
                 .iter()
                 .map(|(n, v)| Ok((n.clone(), val_to_rib_val(v)?)))
                 .collect::<Result<_>>()?,
         ),
-        Val::Tuple(items) => R::Tuple(items.iter().map(val_to_rib_val).collect::<Result<_>>()?),
+        Val::Tuple(items) => R::Tuple(
+            items
+                .iter()
+                .map(val_to_rib_val)
+                .collect::<Result<_>>()?,
+        ),
         Val::Variant(name, payload) => R::Variant(
             name.clone(),
             match payload {
