@@ -8,24 +8,20 @@ use super::run::{CliLinker, Host, Preloads, RunCommand};
 use crate::common::{RunCommon, RunTarget};
 use async_trait::async_trait;
 use clap::Parser;
-use rib::wit_type::{
+use rib_repl::anyhow::{anyhow, bail, Result};
+use rib_repl::anyhow::Context as _;
+use rib_repl::uuid::Uuid;
+use rib_repl::wit_type::{
     AnalysedResourceId, AnalysedResourceMode, NameOptionTypePair, NameTypePair, TypeBool, TypeChr,
     TypeEnum, TypeF32, TypeF64, TypeFlags, TypeHandle, TypeList, TypeOption, TypeRecord,
     TypeResult, TypeS8, TypeS16, TypeS32, TypeS64, TypeStr, TypeTuple, TypeU8, TypeU16, TypeU32,
     TypeU64, TypeVariant, WitExport, WitFunction, WitFunctionParameter, WitFunctionResult,
     WitInterface, WitType,
 };
-use rib::{
-    ComponentDependency, ComponentDependencyKey, ParsedFunctionName, ParsedFunctionSite, Value,
-    ValueAndType,
-};
-use rib_repl::anyhow::{anyhow, bail, Result};
-use rib_repl::anyhow::Context as _;
-use rib_repl::rib;
-use rib_repl::uuid::Uuid;
 use rib_repl::{
-    ComponentFunctionInvoke, ComponentSource, ReplComponentBundle, RibDependencyManager, RibRepl,
-    RibReplConfig,
+    ComponentDependency, ComponentDependencyKey, ComponentFunctionInvoke, ComponentSource,
+    ParsedFunctionName, ParsedFunctionSite, ReplComponentBundle, RibDependencyManager, RibRepl,
+    RibReplConfig, RuntimeValue,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -139,7 +135,7 @@ struct WasmtimeRibDependencyManager {
 #[async_trait]
 impl RibDependencyManager for WasmtimeRibDependencyManager {
     async fn get_dependencies(&self) -> Result<ReplComponentBundle> {
-bail!(
+        bail!(
             "load a component via `wasmtime repl <component.wasm>` (no multi-project mode yet)"
         )
     }
@@ -210,18 +206,15 @@ impl ComponentFunctionInvoke for WasmtimeWorkerInvoke {
         _component_name: &str,
         worker_name: &str,
         function_name: &str,
-        args: Vec<ValueAndType>,
-        return_type: Option<WitType>,
-    ) -> Result<Option<ValueAndType>> {
+        args: Vec<RuntimeValue>,
+        _return_type: Option<WitType>,
+    ) -> Result<Option<RuntimeValue>> {
         if component_id != self.component_id {
-bail!(
-                "unexpected component id (only one component is supported)"
-            );
+            bail!("unexpected component id (only one component is supported)");
         }
 
-        let parsed = ParsedFunctionName::parse(function_name).map_err(|e| {
-anyhow!("invalid function name `{function_name}`: {e}")
-        })?;
+        let parsed = ParsedFunctionName::parse(function_name)
+            .map_err(|e| anyhow!("invalid function name `{function_name}`: {e}"))?;
 
         let path = export_path(&parsed);
         let export = resolve_export(&self.component, &path)
@@ -234,64 +227,38 @@ anyhow!("invalid function name `{function_name}`: {e}")
             .get_func(&mut *store, export)
             .ok_or_else(|| anyhow!("export is not a function"))?;
 
-        let param_tys: Vec<WType> = func.ty(&*store).params().map(|(_, t)| t).collect();
-        let result_tys: Vec<WType> = func.ty(&*store).results().collect();
+        let fty = func.ty(&*store);
+        let n_params = fty.params().count();
+        let n_results = fty.results().count();
 
-        if param_tys.len() != args.len() {
-bail!(
+        if n_params != args.len() {
+            bail!(
                 "expected {} arguments, got {}",
-                param_tys.len(),
+                n_params,
                 args.len()
             );
         }
 
         let mut params = Vec::with_capacity(args.len());
-        for (arg, ty) in args.iter().zip(&param_tys) {
-            params.push(value_and_type_to_val(ty, arg)?);
+        for arg in &args {
+            params.push(runtime_value_to_val(arg)?);
         }
 
-        let mut results: Vec<Val> = result_tys.iter().map(|_| Val::Bool(false)).collect();
+        let mut results: Vec<Val> = (0..n_results).map(|_| Val::Bool(false)).collect();
 
         call_func(&mut store, func, &params, &mut results).await?;
 
         let out = match results.len() {
             0 => None,
-            1 => {
-                let rt = return_type.as_ref().ok_or_else(|| {
-anyhow!("missing return type for non-unit function")
-                })?;
-                Some(val_to_value_and_type(rt, &results[0])?)
-            }
+            1 => Some(val_to_runtime_value(&results[0])?),
             _ => {
-                let tuple_ty = return_type.ok_or_else(|| {
-anyhow!("missing return type for multi-return function")
-                })?;
-                let vals: Result<Vec<ValueAndType>> = results
-                    .iter()
-                    .enumerate()
-                    .map(|(i, v)| {
-                        let elem_ty = tuple_element_type(&tuple_ty, i)?;
-                        val_to_value_and_type(&elem_ty, v)
-                    })
-                    .collect();
-                let parts = vals?;
-                let inner: Vec<Value> = parts.into_iter().map(|v| v.value).collect();
-                Some(ValueAndType::new(Value::Tuple(inner), tuple_ty.clone()))
+                let parts: Result<Vec<RuntimeValue>> =
+                    results.iter().map(val_to_runtime_value).collect();
+                Some(RuntimeValue::Tuple(parts?))
             }
         };
 
         Ok(out)
-    }
-}
-
-fn tuple_element_type(tuple_ty: &WitType, i: usize) -> Result<WitType> {
-    match tuple_ty {
-        WitType::Tuple(t) => t
-            .items
-            .get(i)
-            .cloned()
-            .ok_or_else(|| anyhow!("tuple arity mismatch")),
-        _ => bail!("expected tuple return type for multi-value return"),
     }
 }
 
@@ -323,21 +290,16 @@ fn export_path(parsed: &ParsedFunctionName) -> Vec<String> {
     segments
 }
 
-fn resolve_export(
-    component: &Component,
-    path: &[String],
-) -> Result<ComponentExportIndex> {
+fn resolve_export(component: &Component, path: &[String]) -> Result<ComponentExportIndex> {
     if path.is_empty() {
-bail!("empty export path");
+        bail!("empty export path");
     }
     let mut instance: Option<ComponentExportIndex> = None;
     for name in &path[..path.len() - 1] {
         instance = Some(
             component
                 .get_export_index(instance.as_ref(), name)
-                .ok_or_else(|| {
-anyhow!("missing instance export `{name}`")
-                })?,
+                .ok_or_else(|| anyhow!("missing instance export `{name}`"))?,
         );
     }
     let last = path.last().unwrap();
@@ -556,358 +518,137 @@ fn wasm_type_to_wit(ty: &WType) -> Result<WitType> {
             mode: AnalysedResourceMode::Borrowed,
         }),
         WType::Map(_) => {
-bail!("Rib metadata does not support WIT `map` yet")
+            bail!("Rib metadata does not support WIT `map` yet")
         }
         WType::Future(_) | WType::Stream(_) | WType::ErrorContext => {
-bail!(
-                "async component types are not supported in Rib metadata yet"
-            )
+            bail!("async component types are not supported in Rib metadata yet")
         }
     })
 }
 
-fn value_and_type_to_val(
-    expected: &WType,
-    v: &ValueAndType,
-) -> Result<Val> {
-    use rib::wit_type::WitType as WT;
-    match (expected, &v.value) {
-        (WType::Bool, Value::Bool(b)) => Ok(Val::Bool(*b)),
-        (WType::S8, Value::S8(x)) => Ok(Val::S8(*x)),
-        (WType::U8, Value::U8(x)) => Ok(Val::U8(*x)),
-        (WType::S16, Value::S16(x)) => Ok(Val::S16(*x)),
-        (WType::U16, Value::U16(x)) => Ok(Val::U16(*x)),
-        (WType::S32, Value::S32(x)) => Ok(Val::S32(*x)),
-        (WType::U32, Value::U32(x)) => Ok(Val::U32(*x)),
-        (WType::S64, Value::S64(x)) => Ok(Val::S64(*x)),
-        (WType::U64, Value::U64(x)) => Ok(Val::U64(*x)),
-        (WType::Float32, Value::F32(x)) => Ok(Val::Float32(*x)),
-        (WType::Float64, Value::F64(x)) => Ok(Val::Float64(*x)),
-        (WType::Char, Value::Char(c)) => Ok(Val::Char(*c)),
-        (WType::String, Value::String(s)) => Ok(Val::String(s.clone())),
-        (WType::List(_), Value::List(items)) => {
-            let WType::List(l) = expected else {
-                unreachable!()
-            };
-            let elem = l.ty();
-            let inner = if let WT::List(lt) = &v.typ {
-                items
-                    .iter()
-                    .map(|x| {
-                        value_and_type_to_val(
-                            &elem,
-                            &ValueAndType::new(x.clone(), (*lt.inner).clone()),
-                        )
-                    })
-                    .collect::<Result<_>>()?
-            } else {
-bail!("list type mismatch");
-            };
-            Ok(Val::List(inner))
-        }
-        (WType::Record(_), Value::Record(items)) => {
-            let WType::Record(r) = expected else {
-                unreachable!()
-            };
-            let WT::Record(rec_ty) = &v.typ else {
-bail!("record type mismatch");
-            };
-            if rec_ty.fields.len() != items.len() {
-bail!("record field count mismatch");
-            }
-            let pairs: Result<Vec<(String, Val)>> = r
-                .fields()
-                .zip(items.iter())
-                .zip(rec_ty.fields.iter())
-                .map(|((fld, val), spec)| {
-                    Ok((
-                        fld.name.to_string(),
-                        value_and_type_to_val(
-                            &fld.ty,
-                            &ValueAndType::new(val.clone(), spec.typ.clone()),
-                        )?,
-                    ))
-                })
-                .collect();
-            Ok(Val::Record(pairs?))
-        }
-        (WType::Tuple(_), Value::Tuple(items)) => {
-            let WType::Tuple(t) = expected else {
-                unreachable!()
-            };
-            let WT::Tuple(tup_ty) = &v.typ else {
-bail!("tuple type mismatch");
-            };
-            let inner = t
-                .types()
-                .zip(items.iter())
-                .zip(tup_ty.items.iter())
-                .map(|((wt, val), at)| {
-                    value_and_type_to_val(&wt, &ValueAndType::new(val.clone(), at.clone()))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            Ok(Val::Tuple(inner))
-        }
-        (
-            WType::Variant(_),
-            Value::Variant {
-                case_idx,
-                case_value,
-            },
-        ) => {
-            let WType::Variant(wasm_var) = expected else {
-                unreachable!()
-            };
-            let cases: Vec<_> = wasm_var.cases().collect();
-            let case = cases
-                .get(*case_idx as usize)
-                .ok_or_else(|| anyhow!("invalid variant case index"))?;
-            let payload = match (&case.ty, case_value) {
-                (None, None) => None,
-                (Some(wt), Some(boxed)) => {
-                    let WT::Variant(var_ty) = &v.typ else {
-bail!("variant type mismatch");
-                    };
-                    let case_ty = var_ty
-                        .cases
-                        .get(*case_idx as usize)
-                        .ok_or_else(|| anyhow!("bad variant case"))?;
-                    let inner_ty = case_ty
-                        .typ
-                        .as_ref()
-                        .ok_or_else(|| anyhow!("expected payload type"))?;
-                    Some(Box::new(value_and_type_to_val(
-                        wt,
-                        &ValueAndType::new((**boxed).clone(), inner_ty.clone()),
-                    )?))
-                }
-                _ => bail!("variant payload mismatch"),
-            };
-            Ok(Val::Variant(case.name.to_string(), payload))
-        }
-        (WType::Enum(_), Value::Enum(idx)) => {
-            let WType::Enum(e) = expected else {
-                unreachable!()
-            };
-            let name = e
-                .names()
-                .nth(*idx as usize)
-                .ok_or_else(|| anyhow!("invalid enum discriminant"))?;
-            Ok(Val::Enum(name.to_string()))
-        }
-        (WType::Option(_), Value::Option(inner)) => {
-            let WType::Option(o) = expected else {
-                unreachable!()
-            };
-            let WT::Option(opt_ty) = &v.typ else {
-bail!("option type mismatch");
-            };
-            let mapped = match inner {
-                None => None,
-                Some(b) => Some(Box::new(value_and_type_to_val(
-                    &o.ty(),
-                    &ValueAndType::new((**b).clone(), (*opt_ty.inner).clone()),
-                )?)),
-            };
-            Ok(Val::Option(mapped))
-        }
-        (WType::Result(_), Value::Result(inner)) => {
-            let WType::Result(r) = expected else {
-                unreachable!()
-            };
-            let WT::Result(res_ty) = &v.typ else {
-bail!("result type mismatch");
-            };
-            let mapped = match inner {
-                Ok(v) => Ok(match v {
-                    None => None,
-                    Some(b) => {
-                        let wt = r.ok().ok_or_else(|| {
-anyhow!("result ok type missing")
-                        })?;
-                        let at = res_ty.ok.as_deref().ok_or_else(|| {
-anyhow!("result ok type missing")
-                        })?;
-                        Some(Box::new(value_and_type_to_val(
-                            &wt,
-                            &ValueAndType::new((**b).clone(), at.clone()),
-                        )?))
-                    }
-                }),
-                Err(v) => Err(match v {
-                    None => None,
-                    Some(b) => {
-                        let wt = r.err().ok_or_else(|| {
-anyhow!("result err type missing")
-                        })?;
-                        let at = res_ty.err.as_deref().ok_or_else(|| {
-anyhow!("result err type missing")
-                        })?;
-                        Some(Box::new(value_and_type_to_val(
-                            &wt,
-                            &ValueAndType::new((**b).clone(), at.clone()),
-                        )?))
-                    }
-                }),
-            };
-            Ok(Val::Result(mapped))
-        }
-        (WType::Flags(_), Value::Flags(bits)) => {
-            let WType::Flags(f) = expected else {
-                unreachable!()
-            };
-            let names: Vec<String> = f
-                .names()
-                .enumerate()
-                .filter_map(|(i, n)| {
-                    bits.get(i)
-                        .copied()
-                        .unwrap_or(false)
-                        .then_some(n.to_string())
-                })
-                .collect();
-            Ok(Val::Flags(names))
-        }
-        _ => bail!(
-            "cannot convert Rib value {:?} to Wasmtime value for type {:?}",
-            v.value,
-            expected
+/// [`RuntimeValue`] ↔ Wasmtime [`Val`] by shape only — no WIT / `expected` type.
+fn runtime_value_to_val(rv: &RuntimeValue) -> Result<Val> {
+    use RuntimeValue as R;
+    Ok(match rv {
+        R::Bool(b) => Val::Bool(*b),
+        R::S8(x) => Val::S8(*x),
+        R::U8(x) => Val::U8(*x),
+        R::S16(x) => Val::S16(*x),
+        R::U16(x) => Val::U16(*x),
+        R::S32(x) => Val::S32(*x),
+        R::U32(x) => Val::U32(*x),
+        R::S64(x) => Val::S64(*x),
+        R::U64(x) => Val::U64(*x),
+        R::Float32(x) => Val::Float32(*x),
+        R::Float64(x) => Val::Float64(*x),
+        R::Char(c) => Val::Char(*c),
+        R::String(s) => Val::String(s.clone()),
+        R::List(items) => Val::List(
+            items
+                .iter()
+                .map(runtime_value_to_val)
+                .collect::<Result<_>>()?,
         ),
-    }
+        R::Record(pairs) => Val::Record(
+            pairs
+                .iter()
+                .map(|(n, v)| Ok((n.clone(), runtime_value_to_val(v)?)))
+                .collect::<Result<_>>()?,
+        ),
+        R::Tuple(items) => Val::Tuple(
+            items
+                .iter()
+                .map(runtime_value_to_val)
+                .collect::<Result<_>>()?,
+        ),
+        R::Variant(name, payload) => {
+            let p = match payload {
+                None => None,
+                Some(b) => Some(Box::new(runtime_value_to_val(b)?)),
+            };
+            Val::Variant(name.clone(), p)
+        }
+        R::Enum(name) => Val::Enum(name.clone()),
+        R::Option(inner) => Val::Option(match inner {
+            None => None,
+            Some(b) => Some(Box::new(runtime_value_to_val(b)?)),
+        }),
+        R::Result(inner) => Val::Result(match inner {
+            Ok(v) => Ok(match v {
+                None => None,
+                Some(b) => Some(Box::new(runtime_value_to_val(b)?)),
+            }),
+            Err(v) => Err(match v {
+                None => None,
+                Some(b) => Some(Box::new(runtime_value_to_val(b)?)),
+            }),
+        }),
+        R::Flags(names) => Val::Flags(names.clone()),
+        R::Handle { .. } => bail!("resource handles are not supported in `wasmtime repl` yet"),
+    })
 }
 
-fn val_to_value_and_type(ty: &WitType, v: &Val) -> Result<ValueAndType> {
-    use WitType as WT;
-    Ok(match (ty, v) {
-        (WT::Bool(_), Val::Bool(b)) => ValueAndType::new(Value::Bool(*b), ty.clone()),
-        (WT::S8(_), Val::S8(x)) => ValueAndType::new(Value::S8(*x), ty.clone()),
-        (WT::U8(_), Val::U8(x)) => ValueAndType::new(Value::U8(*x), ty.clone()),
-        (WT::S16(_), Val::S16(x)) => ValueAndType::new(Value::S16(*x), ty.clone()),
-        (WT::U16(_), Val::U16(x)) => ValueAndType::new(Value::U16(*x), ty.clone()),
-        (WT::S32(_), Val::S32(x)) => ValueAndType::new(Value::S32(*x), ty.clone()),
-        (WT::U32(_), Val::U32(x)) => ValueAndType::new(Value::U32(*x), ty.clone()),
-        (WT::S64(_), Val::S64(x)) => ValueAndType::new(Value::S64(*x), ty.clone()),
-        (WT::U64(_), Val::U64(x)) => ValueAndType::new(Value::U64(*x), ty.clone()),
-        (WT::F32(_), Val::Float32(x)) => ValueAndType::new(Value::F32(*x), ty.clone()),
-        (WT::F64(_), Val::Float64(x)) => ValueAndType::new(Value::F64(*x), ty.clone()),
-        (WT::Chr(_), Val::Char(c)) => ValueAndType::new(Value::Char(*c), ty.clone()),
-        (WT::Str(_), Val::String(s)) => ValueAndType::new(Value::String(s.clone()), ty.clone()),
-        (WT::List(lt), Val::List(items)) => {
-            let inner: Result<Vec<Value>> = items
+fn val_to_runtime_value(v: &Val) -> Result<RuntimeValue> {
+    use RuntimeValue as R;
+    Ok(match v {
+        Val::Bool(b) => R::Bool(*b),
+        Val::S8(x) => R::S8(*x),
+        Val::U8(x) => R::U8(*x),
+        Val::S16(x) => R::S16(*x),
+        Val::U16(x) => R::U16(*x),
+        Val::S32(x) => R::S32(*x),
+        Val::U32(x) => R::U32(*x),
+        Val::S64(x) => R::S64(*x),
+        Val::U64(x) => R::U64(*x),
+        Val::Float32(x) => R::Float32(*x),
+        Val::Float64(x) => R::Float64(*x),
+        Val::Char(c) => R::Char(*c),
+        Val::String(s) => R::String(s.clone()),
+        Val::List(items) => R::List(
+            items
                 .iter()
-                .map(|x| Ok(val_to_value_and_type(&lt.inner, x)?.value))
-                .collect();
-            ValueAndType::new(Value::List(inner?), ty.clone())
-        }
-        (WT::Record(rt), Val::Record(pairs)) => {
-            if rt.fields.len() != pairs.len() {
-bail!("record field mismatch");
-            }
-            let vals: Result<Vec<Value>> = rt
-                .fields
+                .map(val_to_runtime_value)
+                .collect::<Result<_>>()?,
+        ),
+        Val::Record(pairs) => R::Record(
+            pairs
                 .iter()
-                .zip(pairs.iter())
-                .map(|(f, (n, val))| {
-                    if f.name != *n {
-bail!("record field name mismatch");
-                    }
-                    Ok(val_to_value_and_type(&f.typ, val)?.value)
-                })
-                .collect();
-            ValueAndType::new(Value::Record(vals?), ty.clone())
-        }
-        (WT::Tuple(tt), Val::Tuple(items)) => {
-            if tt.items.len() != items.len() {
-bail!("tuple arity mismatch");
-            }
-            let vals: Result<Vec<Value>> = tt
-                .items
+                .map(|(n, v)| Ok((n.clone(), val_to_runtime_value(v)?)))
+                .collect::<Result<_>>()?,
+        ),
+        Val::Tuple(items) => R::Tuple(
+            items
                 .iter()
-                .zip(items.iter())
-                .map(|(t, v)| Ok(val_to_value_and_type(t, v)?.value))
-                .collect();
-            ValueAndType::new(Value::Tuple(vals?), ty.clone())
+                .map(val_to_runtime_value)
+                .collect::<Result<_>>()?,
+        ),
+        Val::Variant(name, payload) => R::Variant(
+            name.clone(),
+            match payload {
+                None => None,
+                Some(b) => Some(Box::new(val_to_runtime_value(b)?)),
+            },
+        ),
+        Val::Enum(name) => R::Enum(name.clone()),
+        Val::Option(inner) => R::Option(match inner {
+            None => None,
+            Some(b) => Some(Box::new(val_to_runtime_value(b)?)),
+        }),
+        Val::Result(inner) => R::Result(match inner {
+            Ok(v) => Ok(match v {
+                None => None,
+                Some(b) => Some(Box::new(val_to_runtime_value(b)?)),
+            }),
+            Err(v) => Err(match v {
+                None => None,
+                Some(b) => Some(Box::new(val_to_runtime_value(b)?)),
+            }),
+        }),
+        Val::Flags(names) => R::Flags(names.clone()),
+        Val::Resource(_) => bail!("component resources are not supported in `wasmtime repl` yet"),
+        Val::Map(_) => bail!("WIT maps are not supported in `wasmtime repl` yet"),
+        Val::Future(_) | Val::Stream(_) | Val::ErrorContext(_) => {
+            bail!("async values are not supported in `wasmtime repl` yet")
         }
-        (WT::Variant(vt), Val::Variant(name, payload)) => {
-            let (idx, case_ty) = vt
-                .cases
-                .iter()
-                .enumerate()
-                .find(|(_, c)| c.name == *name)
-                .map(|(i, c)| (i as u32, &c.typ))
-                .ok_or_else(|| anyhow!("unknown variant case `{name}`"))?;
-            let case_value = match (case_ty, payload) {
-                (None, None) => None,
-                (Some(inner), Some(p)) => Some(Box::new(val_to_value_and_type(inner, p)?.value)),
-                _ => bail!("variant payload mismatch"),
-            };
-            ValueAndType::new(
-                Value::Variant {
-                    case_idx: idx,
-                    case_value,
-                },
-                ty.clone(),
-            )
-        }
-        (WT::Enum(et), Val::Enum(name)) => {
-            let idx = et
-                .cases
-                .iter()
-                .position(|c| c == name)
-                .ok_or_else(|| anyhow!("unknown enum case `{name}`"))?
-                as u32;
-            ValueAndType::new(Value::Enum(idx), ty.clone())
-        }
-        (WT::Option(ot), Val::Option(inner)) => {
-            let v = match inner {
-                None => Value::Option(None),
-                Some(b) => {
-                    Value::Option(Some(Box::new(val_to_value_and_type(&ot.inner, b)?.value)))
-                }
-            };
-            ValueAndType::new(v, ty.clone())
-        }
-        (WT::Result(rt), Val::Result(inner)) => {
-            let v = match inner {
-                Ok(x) => Value::Result(Ok(match x {
-                    None => None,
-                    Some(b) => Some(Box::new(
-                        val_to_value_and_type(
-                            rt.ok
-                                .as_deref()
-                                .ok_or_else(|| anyhow!("ok type"))?,
-                            b,
-                        )?
-                        .value,
-                    )),
-                })),
-                Err(x) => Value::Result(Err(match x {
-                    None => None,
-                    Some(b) => Some(Box::new(
-                        val_to_value_and_type(
-                            rt.err
-                                .as_deref()
-                                .ok_or_else(|| anyhow!("err type"))?,
-                            b,
-                        )?
-                        .value,
-                    )),
-                })),
-            };
-            ValueAndType::new(v, ty.clone())
-        }
-        (WT::Flags(ft), Val::Flags(names)) => {
-            let mut bits = vec![false; ft.names.len()];
-            for n in names {
-                let i = ft
-                    .names
-                    .iter()
-                    .position(|x| x == n)
-                    .ok_or_else(|| anyhow!("unknown flag `{n}`"))?;
-                bits[i] = true;
-            }
-            ValueAndType::new(Value::Flags(bits), ty.clone())
-        }
-        _ => bail!("cannot lift Wasmtime value to Rib for type {ty:?}"),
     })
 }
